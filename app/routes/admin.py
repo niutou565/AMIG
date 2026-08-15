@@ -11,7 +11,7 @@ from app.models import (
     upsert_page, delete_page, get_admin_logs, count_admin_logs,
     insert_admin_log, get_setting, set_setting, get_all_settings,
     get_ban_list, add_ban, remove_ban, get_recent_upload_ips,
-    get_ip_like_count, get_all_cooling, reset_cooldown,
+    get_all_cooling, reset_cooldown,
     search_images_admin, count_images_admin, batch_update_status,
     get_likes_by_image, count_likes_by_image, delete_like,
     delete_likes_by_ids, decrement_like_count,
@@ -360,14 +360,8 @@ async def admin_users(request: Request):
     if not admin:
         return RedirectResponse(url="/admin/login", status_code=302)
     ctx = get_admin_context(request)
-    ips = get_recent_upload_ips(50)
-    # 补充点赞数
-    for ip_row in ips:
-        ip_row = dict(ip_row)
-        ip_row["like_count"] = get_ip_like_count(ip_row["ip"])
-    ctx["ips"] = [dict(r) for r in ips]
-    for i, ip_row in enumerate(ctx["ips"]):
-        ctx["ips"][i]["like_count"] = get_ip_like_count(ip_row["ip"])
+    # like_count 已由 get_recent_upload_ips 子查询一并返回，避免 N+1 查询
+    ctx["ips"] = [dict(r) for r in get_recent_upload_ips(50)]
     ctx["bans"] = get_ban_list()
     ctx["coolings"] = get_all_cooling()
     return templates.TemplateResponse(request, "admin/users.html", ctx)

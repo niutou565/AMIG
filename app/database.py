@@ -58,6 +58,10 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_images_like_count ON images(like_count);
         CREATE INDEX IF NOT EXISTS idx_images_content_md5 ON images(content_md5);
         CREATE INDEX IF NOT EXISTS idx_images_created_at ON images(created_at);
+        CREATE INDEX IF NOT EXISTS idx_images_ip ON images(ip);
+        CREATE INDEX IF NOT EXISTS idx_images_ua_hash ON images(ua_hash);
+        CREATE INDEX IF NOT EXISTS idx_images_status_reviewed ON images(status, reviewed_at);
+        CREATE INDEX IF NOT EXISTS idx_images_status_created ON images(status, created_at);
 
         CREATE TABLE IF NOT EXISTS likes (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,6 +77,9 @@ def init_db():
         CREATE UNIQUE INDEX IF NOT EXISTS idx_likes_fingerprint ON likes(image_id, ip, ua_hash);
         CREATE INDEX IF NOT EXISTS idx_likes_created_at ON likes(created_at);
         CREATE INDEX IF NOT EXISTS idx_likes_image_id ON likes(image_id);
+        CREATE INDEX IF NOT EXISTS idx_likes_ip ON likes(ip);
+        CREATE INDEX IF NOT EXISTS idx_likes_province ON likes(province);
+        CREATE INDEX IF NOT EXISTS idx_likes_image_created ON likes(image_id, created_at);
 
         CREATE TABLE IF NOT EXISTS ban_list (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,

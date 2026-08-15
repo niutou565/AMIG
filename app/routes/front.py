@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Request, Form, File, UploadFile, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, Response, FileResponse
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
 from app.config import BASE_DIR, MAX_DESC_LENGTH, MAX_AUTHOR_LENGTH, GALLERY_PER_PAGE
 from app.models import (
     get_random_approved_images, get_latest_approved_images,
@@ -241,8 +242,8 @@ async def upload_action(
     if not valid:
         return templates.TemplateResponse(request, "upload.html", {**ctx, "error": err_msg})
 
-    # 处理图片
-    result, err_msg = process_image(file_data)
+    # 处理图片（在独立线程池中执行，避免阻塞事件循环）
+    result, err_msg = await run_in_threadpool(process_image, file_data)
     if not result:
         return templates.TemplateResponse(request, "upload.html", {**ctx, "error": f"图片处理失败：{err_msg}"})
 

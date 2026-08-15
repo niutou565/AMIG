@@ -743,13 +743,15 @@ def batch_update_status(ids, status, admin_id, admin_name):
 
 
 def get_recent_upload_ips(limit=50):
+    """获取最近上传 IP 的统计，点赞数通过子查询一并返回，避免 N+1 查询"""
     return get_db().execute(
         """SELECT ip, province, city,
            COUNT(*) as upload_count,
            SUM(CASE WHEN status='approved' THEN 1 ELSE 0 END) as approved,
            SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending,
            SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END) as rejected,
-           MAX(created_at) as last_active
+           MAX(created_at) as last_active,
+           (SELECT COUNT(*) FROM likes l WHERE l.ip = images.ip) as like_count
            FROM images
            GROUP BY ip
            ORDER BY last_active DESC

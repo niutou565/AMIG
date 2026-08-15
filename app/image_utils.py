@@ -76,12 +76,6 @@ def process_image(file_data: bytes) -> tuple:
     except Exception:
         pass
 
-    # 彻底剥离 EXIF
-    data = list(img.getdata())
-    img_without_exif = Image.new(img.mode, img.size)
-    img_without_exif.putdata(data)
-    img = img_without_exif
-
     original_size = len(file_data)
     width, height = img.size
 
