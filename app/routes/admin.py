@@ -42,7 +42,6 @@ def get_admin_context(request: Request):
     admin = admin_required(request)
     settings = get_all_settings()
     return {
-        "request": request,
         "admin": admin,
         "site_name": settings.get("site_name", "匿名图片分享"),
         "accent_color": settings.get("theme_accent_color", "#6c5ce7"),
@@ -57,7 +56,7 @@ async def login_page(request: Request):
     admin = get_current_admin(request)
     if admin:
         return RedirectResponse(url="/admin/dashboard", status_code=302)
-    return templates.TemplateResponse("admin/login.html", {"request": request, "csrf_token": getattr(request.state, "csrf_token", "")})
+    return templates.TemplateResponse(request, "admin/login.html", {"csrf_token": getattr(request.state, "csrf_token", "")})
 
 
 @router.post("/login", response_class=HTMLResponse)
@@ -68,14 +67,14 @@ async def login_action(
     csrf_token: str = Form(""),
 ):
     if not validate_csrf(request, csrf_token):
-        return templates.TemplateResponse("admin/login.html", {
-            "request": request, "error": "请求无效，请刷新页面重试", "csrf_token": getattr(request.state, "csrf_token", "")
+        return templates.TemplateResponse(request, "admin/login.html", {
+            "error": "请求无效，请刷新页面重试", "csrf_token": getattr(request.state, "csrf_token", "")
         })
 
     success, result, admin_obj = login(username, password)
     if not success:
-        return templates.TemplateResponse("admin/login.html", {
-            "request": request, "error": result, "csrf_token": getattr(request.state, "csrf_token", "")
+        return templates.TemplateResponse(request, "admin/login.html", {
+            "error": result, "csrf_token": getattr(request.state, "csrf_token", "")
         })
 
     response = RedirectResponse(url="/admin/dashboard", status_code=302)
@@ -116,7 +115,7 @@ async def dashboard(request: Request):
     data["hot_window"] = [dict(r) for r in data["hot_window"]]
     data["hot_all"] = [dict(r) for r in data["hot_all"]]
     ctx["data"] = data
-    return templates.TemplateResponse("admin/dashboard.html", ctx)
+    return templates.TemplateResponse(request, "admin/dashboard.html", ctx)
 
 
 # ========== 图片审核 ==========
@@ -137,7 +136,7 @@ async def review_list(
     ctx["query"] = query
     ctx["page"] = page
     ctx["total_pages"] = max(1, (ctx["total"] + ADMIN_PER_PAGE - 1) // ADMIN_PER_PAGE)
-    return templates.TemplateResponse("admin/review.html", ctx)
+    return templates.TemplateResponse(request, "admin/review.html", ctx)
 
 
 @router.get("/review/{image_id}", response_class=HTMLResponse)
@@ -149,7 +148,7 @@ async def review_detail(request: Request, image_id: int):
     ctx["image"] = get_image_by_id(image_id)
     if not ctx["image"]:
         raise HTTPException(status_code=404)
-    return templates.TemplateResponse("admin/review_detail.html", ctx)
+    return templates.TemplateResponse(request, "admin/review_detail.html", ctx)
 
 
 @router.post("/review/{image_id}", response_class=HTMLResponse)
@@ -264,7 +263,7 @@ async def admin_images(
     ctx["sort"] = sort
     ctx["page"] = page
     ctx["total_pages"] = max(1, (ctx["total"] + ADMIN_PER_PAGE - 1) // ADMIN_PER_PAGE)
-    return templates.TemplateResponse("admin/images.html", ctx)
+    return templates.TemplateResponse(request, "admin/images.html", ctx)
 
 
 @router.get("/images/{image_id}", response_class=HTMLResponse)
@@ -278,7 +277,7 @@ async def admin_image_detail(request: Request, image_id: int):
         raise HTTPException(status_code=404)
     ctx["likes"] = get_likes_by_image(image_id, LIKES_PER_PAGE, 0)
     ctx["likes_count"] = count_likes_by_image(image_id)
-    return templates.TemplateResponse("admin/image_detail.html", ctx)
+    return templates.TemplateResponse(request, "admin/image_detail.html", ctx)
 
 
 @router.post("/images/{image_id}/edit", response_class=HTMLResponse)
@@ -311,7 +310,7 @@ async def admin_image_edit(
         ctx["likes"] = get_likes_by_image(image_id, LIKES_PER_PAGE, 0)
         ctx["likes_count"] = count_likes_by_image(image_id)
         ctx["edit_error"] = error
-        return templates.TemplateResponse("admin/image_detail.html", ctx)
+        return templates.TemplateResponse(request, "admin/image_detail.html", ctx)
 
     update_image_description(image_id, new_desc, admin["id"], admin["username"])
     return RedirectResponse(url=f"/admin/images/{image_id}?saved=1", status_code=302)
@@ -371,7 +370,7 @@ async def admin_users(request: Request):
         ctx["ips"][i]["like_count"] = get_ip_like_count(ip_row["ip"])
     ctx["bans"] = get_ban_list()
     ctx["coolings"] = get_all_cooling()
-    return templates.TemplateResponse("admin/users.html", ctx)
+    return templates.TemplateResponse(request, "admin/users.html", ctx)
 
 
 @router.post("/users/ban", response_class=HTMLResponse)
@@ -431,7 +430,7 @@ async def admin_settings(request: Request):
         return RedirectResponse(url="/admin/login", status_code=302)
     ctx = get_admin_context(request)
     ctx["settings"] = get_all_settings()
-    return templates.TemplateResponse("admin/settings.html", ctx)
+    return templates.TemplateResponse(request, "admin/settings.html", ctx)
 
 
 @router.post("/settings", response_class=HTMLResponse)
@@ -506,7 +505,7 @@ async def admin_links(request: Request):
         return RedirectResponse(url="/admin/login", status_code=302)
     ctx = get_admin_context(request)
     ctx["links"] = get_all_links()
-    return templates.TemplateResponse("admin/links.html", ctx)
+    return templates.TemplateResponse(request, "admin/links.html", ctx)
 
 
 @router.post("/links/save", response_class=HTMLResponse)
@@ -557,7 +556,7 @@ async def admin_pages(request: Request):
         return RedirectResponse(url="/admin/login", status_code=302)
     ctx = get_admin_context(request)
     ctx["pages"] = get_all_pages()
-    return templates.TemplateResponse("admin/pages.html", ctx)
+    return templates.TemplateResponse(request, "admin/pages.html", ctx)
 
 
 @router.get("/pages/edit/{page_id}", response_class=HTMLResponse)
@@ -568,7 +567,7 @@ async def admin_pages_edit(request: Request, page_id: int = 0):
         return RedirectResponse(url="/admin/login", status_code=302)
     ctx = get_admin_context(request)
     ctx["page_obj"] = get_page_by_id(page_id) if page_id else None
-    return templates.TemplateResponse("admin/page_edit.html", ctx)
+    return templates.TemplateResponse(request, "admin/page_edit.html", ctx)
 
 
 @router.post("/pages/save", response_class=HTMLResponse)
@@ -620,7 +619,7 @@ async def admin_logs(request: Request, page: int = 1):
     ctx["total"] = count_admin_logs()
     ctx["page"] = page
     ctx["total_pages"] = max(1, (ctx["total"] + 50 - 1) // 50)
-    return templates.TemplateResponse("admin/logs.html", ctx)
+    return templates.TemplateResponse(request, "admin/logs.html", ctx)
 
 
 # ========== 修改密码 ==========
@@ -631,7 +630,7 @@ async def admin_change_password_page(request: Request):
     if not admin:
         return RedirectResponse(url="/admin/login", status_code=302)
     ctx = get_admin_context(request)
-    return templates.TemplateResponse("admin/change_password.html", ctx)
+    return templates.TemplateResponse(request, "admin/change_password.html", ctx)
 
 
 @router.post("/change-password", response_class=HTMLResponse)
@@ -653,16 +652,16 @@ async def admin_change_password_action(
     if len(new_password) < 6:
         ctx = get_admin_context(request)
         ctx["error"] = "新密码长度不能少于6位"
-        return templates.TemplateResponse("admin/change_password.html", ctx)
+        return templates.TemplateResponse(request, "admin/change_password.html", ctx)
 
     if new_password != confirm_password:
         ctx = get_admin_context(request)
         ctx["error"] = "两次输入的新密码不一致"
-        return templates.TemplateResponse("admin/change_password.html", ctx)
+        return templates.TemplateResponse(request, "admin/change_password.html", ctx)
 
     update_admin_password(admin["id"], hash_password(new_password))
     insert_admin_log(admin["id"], admin["username"], "change_password", "修改密码")
 
     ctx = get_admin_context(request)
     ctx["success"] = "密码修改成功"
-    return templates.TemplateResponse("admin/change_password.html", ctx)
+    return templates.TemplateResponse(request, "admin/change_password.html", ctx)

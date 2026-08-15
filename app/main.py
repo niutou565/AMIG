@@ -12,19 +12,6 @@ from app.ip_geo import init_ip2region
 from app.middleware import AdminDomainMiddleware, CSRFMiddleware
 from app.routes import front, admin, api
 
-# Load .env file
-env_path = BASE_DIR / ".env"
-if env_path.exists():
-    with open(env_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                key, _, value = line.partition("=")
-                key = key.strip()
-                value = value.strip().strip('"').strip("'")
-                if key and key not in os.environ:
-                    os.environ[key] = value
-
 # Ensure directories exist
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 os.makedirs(BASE_DIR / "data", exist_ok=True)
@@ -55,7 +42,7 @@ if uploads_dir.exists():
 # Exception handlers
 @app.exception_handler(404)
 async def not_found_handler(request: Request, exc):
-    return templates.TemplateResponse("404.html", {"request": request}, status_code=404)
+    return templates.TemplateResponse(request, "404.html", {}, status_code=404)
 
 
 @app.exception_handler(500)

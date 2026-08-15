@@ -48,7 +48,6 @@ def get_settings_context():
 def get_common_context(request: Request):
     """Build common template context."""
     ctx = get_settings_context()
-    ctx["request"] = request
     ctx["pages"] = get_visible_pages()
     ctx["links"] = get_visible_links()
     # CSRF token (set by CSRFMiddleware, always available via request.state)
@@ -64,7 +63,7 @@ async def index(request: Request):
     ctx["random_images"] = get_random_approved_images(12)
     ctx["latest_images"] = get_latest_approved_images(12)
     ctx["top_images"] = get_top_cached(12)
-    return templates.TemplateResponse("index.html", ctx)
+    return templates.TemplateResponse(request, "index.html", ctx)
 
 
 # ========== 图库 ==========
@@ -84,7 +83,7 @@ async def gallery(request: Request, q: str = "", page: int = 1):
     ctx["page"] = page
     ctx["total"] = total
     ctx["total_pages"] = max(1, (total + GALLERY_PER_PAGE - 1) // GALLERY_PER_PAGE)
-    return templates.TemplateResponse("gallery.html", ctx)
+    return templates.TemplateResponse(request, "gallery.html", ctx)
 
 
 # ========== 热度榜 ==========
@@ -102,7 +101,7 @@ async def top_list(request: Request, page: int = 1):
     ctx["page"] = page
     ctx["total_pages"] = max(1, (ctx["total"] + TOP_PER_PAGE - 1) // TOP_PER_PAGE)
     ctx["window_days"] = window_days
-    return templates.TemplateResponse("top.html", ctx)
+    return templates.TemplateResponse(request, "top.html", ctx)
 
 
 # ========== 图片详情 ==========
@@ -146,7 +145,7 @@ async def image_detail(request: Request, image_id: int):
     ctx["prev_id"] = prev_row[0] if prev_row else None
     ctx["next_id"] = next_row[0] if next_row else None
 
-    return templates.TemplateResponse("image_detail.html", ctx)
+    return templates.TemplateResponse(request, "image_detail.html", ctx)
 
 
 # ========== 上传页 ==========
@@ -165,7 +164,7 @@ def _prepare_upload_context(request: Request):
 @router.get("/upload", response_class=HTMLResponse)
 async def upload_page(request: Request):
     ctx = _prepare_upload_context(request)
-    return templates.TemplateResponse("upload.html", ctx)
+    return templates.TemplateResponse(request, "upload.html", ctx)
 
 
 @router.post("/upload", response_class=HTMLResponse)
@@ -185,25 +184,25 @@ async def upload_action(
 
     # 蜜罐检查
     if honeypot:
-        return templates.TemplateResponse("upload.html", {**ctx, "error": "上传失败"})
+        return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "上传失败"})
 
     # CSRF 检查
     from app.middleware import validate_csrf
     if not validate_csrf(request, csrf_token):
-        return templates.TemplateResponse("upload.html", {**ctx, "error": "请求无效，请刷新页面后重试"})
+        return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "请求无效，请刷新页面后重试"})
 
     # 同意站规
     if agree != "1":
-        return templates.TemplateResponse("upload.html", {**ctx, "error": "请先阅读并同意站规"})
+        return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "请先阅读并同意站规"})
 
     # 验证码
     if get_setting("enable_captcha", "0") == "1":
         try:
             expected = int(captcha_a) + int(captcha_b)
             if str(captcha_answer).strip() != str(expected):
-                return templates.TemplateResponse("upload.html", {**ctx, "error": "验证码错误"})
+                return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "验证码错误"})
         except (ValueError, TypeError):
-            return templates.TemplateResponse("upload.html", {**ctx, "error": "验证码错误"})
+            return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "验证码错误"})
 
     # 输入校验
     description = description.strip()[:MAX_DESC_LENGTH]
@@ -212,11 +211,11 @@ async def upload_action(
         author = ""
 
     if not description:
-        return templates.TemplateResponse("upload.html", {**ctx, "error": "请输入简介"})
+        return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "请输入简介"})
 
     # 敏感词检查
     if check_sensitive(description) or (author and check_sensitive(author)):
-        return templates.TemplateResponse("upload.html", {**ctx, "error": "内容包含敏感词，请修改后重试"})
+        return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "内容包含敏感词，请修改后重试"})
 
     ip = get_client_ip(request)
     ua_val = request.headers.get("user-agent", "")
@@ -225,27 +224,27 @@ async def upload_action(
     # 封禁检查
     banned, ban_msg = check_ban_status(ip, ua_hash_val)
     if banned:
-        return templates.TemplateResponse("upload.html", {**ctx, "error": ban_msg})
+        return templates.TemplateResponse(request, "upload.html", {**ctx, "error": ban_msg})
 
     # 限流检查
     allowed, limit_msg = check_upload_limit(ip, ua_hash_val)
     if not allowed:
-        return templates.TemplateResponse("upload.html", {**ctx, "error": limit_msg})
+        return templates.TemplateResponse(request, "upload.html", {**ctx, "error": limit_msg})
 
     # 读取文件
     file_data = await image.read()
     if not file_data:
-        return templates.TemplateResponse("upload.html", {**ctx, "error": "请选择图片文件"})
+        return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "请选择图片文件"})
 
     # 验证图片
     valid, err_msg = validate_image(file_data, image.filename or "unknown.jpg")
     if not valid:
-        return templates.TemplateResponse("upload.html", {**ctx, "error": err_msg})
+        return templates.TemplateResponse(request, "upload.html", {**ctx, "error": err_msg})
 
     # 处理图片
     result, err_msg = process_image(file_data)
     if not result:
-        return templates.TemplateResponse("upload.html", {**ctx, "error": f"图片处理失败：{err_msg}"})
+        return templates.TemplateResponse(request, "upload.html", {**ctx, "error": f"图片处理失败：{err_msg}"})
 
     # 图片去重
     if get_setting("enable_dedup", "1") == "1":
@@ -261,7 +260,7 @@ async def upload_action(
                 ip, ua_val, ua_hash_val, province, city, is_dup=1
             )
             increment_daily_stat(today_str(), "upload_count")
-            return templates.TemplateResponse("upload.html", {
+            return templates.TemplateResponse(request, "upload.html", {
                 **ctx, "success": "已提交，等待审核通过后公开展示（系统检测到疑似重复图片，将标记审核）"
             })
 
@@ -279,7 +278,7 @@ async def upload_action(
     # 更新统计
     increment_daily_stat(today_str(), "upload_count")
 
-    return templates.TemplateResponse("upload.html", {
+    return templates.TemplateResponse(request, "upload.html", {
         **ctx, "success": "已提交，等待审核通过后公开展示"
     })
 
@@ -293,7 +292,7 @@ async def custom_page(request: Request, slug: str):
         raise HTTPException(status_code=404)
     ctx = get_common_context(request)
     ctx["page"] = page
-    return templates.TemplateResponse("page.html", ctx)
+    return templates.TemplateResponse(request, "page.html", ctx)
 
 
 # ========== 静态文件 ==========
