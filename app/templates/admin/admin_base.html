@@ -30,6 +30,7 @@
                 <span>{{ admin.username }}</span>
                 <a href="/admin/logout">退出</a>
             </div>
+            <div class="sidebar-version">此网站基于匿名图片分享站 {{ app_name }} {{ app_version }}</div>
         </aside>
         <main class="admin-main">
             {% block content %}{% endblock %}

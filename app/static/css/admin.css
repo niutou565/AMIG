@@ -50,6 +50,15 @@
     font-size: 0.85rem;
     color: var(--text-secondary);
 }
+.sidebar-version {
+    padding: 0.5rem 1rem;
+    border-top: 1px solid var(--border);
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+    opacity: 0.75;
+    text-align: center;
+    line-height: 1.4;
+}
 
 /* 主内容 */
 .admin-main {
@@ -229,6 +238,7 @@ mark.hl { background: var(--warning); color: #1a1a1a; border-radius: 2px; paddin
     .sidebar-nav a.active { border-bottom-color: var(--accent); border-left: none; }
     .sidebar-brand { padding: 0.5rem; border: none; }
     .sidebar-footer { display: none; }
+    .sidebar-version { display: none; }
     .admin-main { padding: 1rem; }
     .stats-grid { grid-template-columns: repeat(3, 1fr); }
     .review-detail { flex-direction: column; }

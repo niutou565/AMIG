@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
-from app.config import UPLOADS_DIR, BASE_DIR
+from app.config import UPLOADS_DIR, BASE_DIR, APP_VERSION
 from app.database import init_db, close_db
 from app.ip_geo import init_ip2region
 from app.middleware import AdminDomainMiddleware, CSRFMiddleware
@@ -21,7 +21,7 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
 
 app = FastAPI(
     title="Anonymous Image Sharing",
-    version="1.0.0",
+    version=APP_VERSION,
     docs_url=None,
     redoc_url=None,
 )

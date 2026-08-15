@@ -1,0 +1,11 @@
+# 统一行尾，避免跨平台源码/脚本出现 CRLF 问题
+* text=auto
+
+# bash 脚本必须 LF，否则 Linux 上无法运行
+*.sh text eol=lf
+
+# Python 源码统一 LF
+*.py text eol=lf
+
+# Windows 批处理保持 CRLF
+*.bat text eol=crlf

@@ -4,7 +4,7 @@ from fastapi import APIRouter, Request, Form, File, UploadFile, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from markupsafe import escape, Markup
-from app.config import BASE_DIR, ADMIN_PER_PAGE, LIKES_PER_PAGE, MAX_DESC_LENGTH, MAX_TITLE_LENGTH, UPLOADS_DIR
+from app.config import BASE_DIR, ADMIN_PER_PAGE, LIKES_PER_PAGE, MAX_DESC_LENGTH, MAX_TITLE_LENGTH, UPLOADS_DIR, APP_NAME, APP_VERSION
 from app.models import (
     get_images_by_status, count_images_by_status, get_image_by_id,
     update_image_status, update_image_content, delete_image, get_all_links, get_link_by_id,
@@ -50,6 +50,8 @@ def highlight(text, keyword):
 
 
 templates.env.filters["highlight"] = highlight
+templates.env.globals["app_name"] = APP_NAME
+templates.env.globals["app_version"] = APP_VERSION
 
 # Logo 允许的扩展名
 ALLOWED_LOGO_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".ico", ".svg"}
