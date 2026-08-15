@@ -1,0 +1,85 @@
+{% extends "admin/admin_base.html" %}
+{% block title %}图片审核{% endblock %}
+
+{% block content %}
+<h1>图片审核</h1>
+
+<div class="toolbar">
+    <form class="toolbar-search" method="get">
+        <input type="text" name="query" placeholder="搜索待审核图片..." value="{{ query }}">
+        <button type="submit" class="btn btn-sm">搜索</button>
+    </form>
+</div>
+
+<div class="batch-actions">
+    <form method="post" action="/admin/review/batch" id="batchForm" onsubmit="return confirm('确定批量操作？')">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="ids" id="batchIds">
+        <button type="button" class="btn btn-sm" onclick="batchAction('approved')">批量通过</button>
+        <button type="button" class="btn btn-sm btn-danger" onclick="batchAction('rejected')">批量删除</button>
+    </form>
+</div>
+
+<table class="data-table">
+    <thead>
+        <tr>
+            <th><input type="checkbox" id="selectAll"></th>
+            <th>缩略图</th>
+            <th>简介</th>
+            <th>署名</th>
+            <th>IP/地区</th>
+            <th>时间</th>
+            <th>操作</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for img in images %}
+        <tr>
+            <td><input type="checkbox" class="img-check" value="{{ img.id }}"></td>
+            <td><img src="/uploads/{{ img.thumb_filename }}" class="table-thumb" loading="lazy"></td>
+            <td>{{ img.description[:40] }}</td>
+            <td>{{ img.author or '-' }}</td>
+            <td><span title="{{ img.ip }}">{{ img.province }}{{ img.city }}</span></td>
+            <td>{{ img.created_at[:10] }}</td>
+            <td>
+                <form method="post" action="/admin/review/{{ img.id }}" style="display:inline" onsubmit="return confirm('确定通过该图片？')">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" name="action" value="approve" class="btn btn-sm btn-success">通过</button>
+                </form>
+                <form method="post" action="/admin/review/{{ img.id }}" style="display:inline" onsubmit="return confirm('确定拒绝并删除该图片？不可恢复。')">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" name="action" value="reject" class="btn btn-sm btn-danger">删除</button>
+                </form>
+                <a href="/admin/review/{{ img.id }}" class="btn btn-sm">详情</a>
+            </td>
+        </tr>
+        {% else %}
+        <tr>
+            <td colspan="7" class="empty-tip">暂无待审核图片</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+{% include "components/pagination.html" %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.getElementById('selectAll')?.addEventListener('change', function() {
+    document.querySelectorAll('.img-check').forEach(cb => cb.checked = this.checked);
+});
+function batchAction(action) {
+    const ids = Array.from(document.querySelectorAll('.img-check:checked')).map(cb => cb.value);
+    if (!ids.length) { alert('请选择图片'); return; }
+    document.getElementById('batchIds').value = ids.join(',');
+    const form = document.getElementById('batchForm');
+    const btn = document.createElement('input');
+    btn.type = 'hidden';
+    btn.name = 'action';
+    btn.value = action;
+    form.appendChild(btn);
+    form.submit();
+}
+</script>
+{% endblock %}

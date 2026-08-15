@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}{{ image.description[:30] }} - {{ site_name }}{% endblock %}
+
+{% block content %}
+<div class="image-detail">
+    <div class="detail-nav">
+        {% if prev_id %}<a href="/image/{{ prev_id }}" class="nav-arrow">&larr; 上一张</a>{% else %}<span></span>{% endif %}
+        {% if next_id %}<a href="/image/{{ next_id }}" class="nav-arrow">下一张 &rarr;</a>{% else %}<span></span>{% endif %}
+    </div>
+
+    <div class="detail-image-wrap">
+        <a href="/uploads/{{ image.filename }}" target="_blank">
+            <img src="/uploads/{{ image.filename }}" alt="{{ image.description }}" class="detail-image">
+        </a>
+    </div>
+
+    <div class="detail-info">
+        <p class="detail-desc">{{ image.description }}</p>
+        <div class="detail-meta">
+            <span>上传者：{{ image.author or '用户' }}</span>
+            <span>位置：{% if image.province %}{{ image.province }}{{ image.city }}{% else %}未知{% endif %}</span>
+            <span>上传时间：{{ image.created_at[:10] }}</span>
+            <span>尺寸：{{ image.width }}x{{ image.height }}</span>
+            <span>大小：{{ (image.compressed_size / 1024)|round|int }}KB</span>
+            <span>浏览：{{ image.views }} 次</span>
+        </div>
+    </div>
+
+    <div class="like-section">
+        <button class="like-btn {% if has_liked %}liked{% endif %}" id="likeBtn" data-image-id="{{ image.id }}">
+            <span class="like-icon">&#10084;</span>
+            <span class="like-text" id="likeText">{% if has_liked %}已赞{% else %}点赞{% endif %}</span>
+            <span class="like-count-num" id="likeCount">{{ likes_count }}</span>
+        </button>
+    </div>
+
+    {% if likes %}
+    <div class="like-list">
+        <h3>点赞列表</h3>
+        {% for like in likes %}
+        <div class="like-item">
+            <span class="like-user">来自{% if like.province %}{{ like.province }}{{ like.city }}{% else %}未知地区{% endif %}的用户</span>
+            <span class="like-time">赞了这张图</span>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+    const btn = document.getElementById('likeBtn');
+    if (!btn) return;
+    btn.addEventListener('click', async function() {
+        if (btn.classList.contains('liked')) {
+            alert('您已经赞过这张图片了');
+            return;
+        }
+        btn.disabled = true;
+        try {
+            const resp = await fetch('/api/like/' + btn.dataset.imageId, { method: 'POST' });
+            const data = await resp.json();
+            if (data.success) {
+                btn.classList.add('liked');
+                document.getElementById('likeText').textContent = '已赞';
+                document.getElementById('likeCount').textContent = data.like_count;
+            } else {
+                alert(data.error || '点赞失败');
+            }
+        } catch(e) {
+            alert('网络错误，请重试');
+        }
+        btn.disabled = false;
+    });
+})();
+</script>
+{% endblock %}

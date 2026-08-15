@@ -1,0 +1,31 @@
+{% extends "admin/admin_base.html" %}
+{% block title %}操作日志{% endblock %}
+
+{% block content %}
+<h1>操作日志</h1>
+
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>时间</th>
+            <th>管理员</th>
+            <th>动作</th>
+            <th>详情</th>
+            <th>目标</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for log in logs %}
+        <tr>
+            <td>{{ log.created_at[:19] }}</td>
+            <td>{{ log.admin_name }}</td>
+            <td>{{ log.action }}</td>
+            <td>{{ log.detail }}</td>
+            <td>{{ log.target }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+{% include "components/pagination.html" %}
+{% endblock %}

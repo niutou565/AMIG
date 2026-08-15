@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}后台管理{% endblock %} - {{ site_name }}</title>
+    <link rel="stylesheet" href="/static/css/dark.css">
+    <link rel="stylesheet" href="/static/css/admin.css">
+    <style>:root { --accent: {{ accent_color }}; }</style>
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <div class="admin-layout">
+        <aside class="admin-sidebar">
+            <div class="sidebar-brand">
+                <a href="/admin/dashboard">{{ site_name }}</a>
+            </div>
+            <nav class="sidebar-nav">
+                <a href="/admin/dashboard" class="{% if request.url.path == '/admin/dashboard' %}active{% endif %}">仪表盘</a>
+                <a href="/admin/review" class="{% if request.url.path.startswith('/admin/review') %}active{% endif %}">图片审核</a>
+                <a href="/admin/images" class="{% if request.url.path.startswith('/admin/images') %}active{% endif %}">图片管理</a>
+                <a href="/admin/users" class="{% if request.url.path == '/admin/users' %}active{% endif %}">用户/IP 管理</a>
+                <a href="/admin/settings" class="{% if request.url.path == '/admin/settings' %}active{% endif %}">站点设置</a>
+                <a href="/admin/links" class="{% if request.url.path == '/admin/links' %}active{% endif %}">友情链接</a>
+                <a href="/admin/pages" class="{% if request.url.path.startswith('/admin/pages') %}active{% endif %}">页面管理</a>
+                <a href="/admin/logs" class="{% if request.url.path == '/admin/logs' %}active{% endif %}">操作日志</a>
+                <a href="/admin/change-password" class="{% if request.url.path == '/admin/change-password' %}active{% endif %}">修改密码</a>
+            </nav>
+            <div class="sidebar-footer">
+                <span>{{ admin.username }}</span>
+                <a href="/admin/logout">退出</a>
+            </div>
+        </aside>
+        <main class="admin-main">
+            {% block content %}{% endblock %}
+        </main>
+    </div>
+    <script src="/static/js/admin.js"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

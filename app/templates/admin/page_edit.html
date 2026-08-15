@@ -1,0 +1,39 @@
+{% extends "admin/admin_base.html" %}
+{% block title %}{% if page_obj %}编辑{% else %}新增{% endif %}页面{% endblock %}
+
+{% block content %}
+<h1>{% if page_obj %}编辑{% else %}新增{% endif %}页面</h1>
+
+<form method="post" action="/admin/pages/save">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="page_id" value="{{ page_obj.id if page_obj else '' }}">
+
+    <div class="form-group">
+        <label>Slug <span class="required">*</span></label>
+        <input type="text" name="slug" value="{{ page_obj.slug if page_obj else '' }}" required placeholder="about">
+    </div>
+    <div class="form-group">
+        <label>标题 <span class="required">*</span></label>
+        <input type="text" name="title" value="{{ page_obj.title if page_obj else '' }}" required>
+    </div>
+    <div class="form-group">
+        <label>内容（支持 Markdown 和 HTML）</label>
+        <textarea name="content" rows="15" style="font-family:monospace">{{ page_obj.content if page_obj else '' }}</textarea>
+    </div>
+    <div class="form-row">
+        <div class="form-group">
+            <label>排序</label>
+            <input type="number" name="sort_order" value="{{ page_obj.sort_order if page_obj else 0 }}">
+        </div>
+        <div class="form-group">
+            <label>状态</label>
+            <select name="is_visible">
+                <option value="1" {% if page_obj and page_obj.is_visible %}selected{% endif %}>显示</option>
+                <option value="0" {% if page_obj and not page_obj.is_visible %}selected{% endif %}>隐藏</option>
+            </select>
+        </div>
+    </div>
+    <button type="submit" class="btn btn-primary">保存</button>
+    <a href="/admin/pages" class="btn">取消</a>
+</form>
+{% endblock %}

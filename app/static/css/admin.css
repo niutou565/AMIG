@@ -1,0 +1,188 @@
+/* ===== 后台管理样式 ===== */
+.admin-layout {
+    display: flex;
+    min-height: 100vh;
+}
+
+/* 侧边栏 */
+.admin-sidebar {
+    width: 220px;
+    background: var(--bg-card);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    flex-shrink: 0;
+}
+.sidebar-brand {
+    padding: 1rem;
+    border-bottom: 1px solid var(--border);
+    font-weight: 600;
+    font-size: 1.1rem;
+}
+.sidebar-brand a { color: var(--text); }
+.sidebar-nav {
+    flex: 1;
+    padding: 0.5rem 0;
+    overflow-y: auto;
+}
+.sidebar-nav a {
+    display: block;
+    padding: 0.6rem 1rem;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    transition: var(--transition);
+    border-left: 3px solid transparent;
+}
+.sidebar-nav a:hover, .sidebar-nav a.active {
+    color: var(--text);
+    background: rgba(255,255,255,0.03);
+    border-left-color: var(--accent);
+}
+.sidebar-footer {
+    padding: 0.75rem 1rem;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+}
+
+/* 主内容 */
+.admin-main {
+    flex: 1;
+    padding: 1.5rem;
+    min-width: 0;
+    overflow-x: auto;
+}
+.admin-main h1 { margin-bottom: 1.5rem; font-size: 1.5rem; }
+.admin-main h3 { margin: 1.5rem 0 0.75rem; color: var(--text-secondary); }
+
+/* 统计卡片 */
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 0.75rem;
+    margin-bottom: 2rem;
+}
+.stat-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1rem;
+    text-align: center;
+}
+.stat-value { font-size: 1.8rem; font-weight: 700; color: var(--accent); }
+.stat-label { font-size: 0.8rem; color: var(--text-secondary); margin-top: 0.25rem; }
+
+/* 图表 */
+.chart-section { margin-bottom: 2rem; }
+.chart-tabs { display: flex; gap: 0.5rem; margin-bottom: 0.5rem; }
+.chart-tab {
+    padding: 0.25rem 0.75rem;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    cursor: pointer;
+}
+.chart-tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.chart-container { background: var(--bg-card); border-radius: var(--radius); padding: 1rem; }
+.chart-svg { width: 100%; height: auto; }
+
+/* 省份分布 */
+.province-list { display: flex; flex-direction: column; gap: 0.5rem; }
+.province-item { display: flex; align-items: center; gap: 0.75rem; }
+.province-name { width: 80px; font-size: 0.85rem; flex-shrink: 0; }
+.province-bar-wrap { flex: 1; height: 20px; background: var(--bg-input); border-radius: 10px; overflow: hidden; }
+.province-bar { height: 100%; background: var(--accent); border-radius: 10px; transition: width 0.3s; }
+.province-count { font-size: 0.85rem; color: var(--text-secondary); width: 40px; text-align: right; }
+
+/* 热门图片 */
+.hot-images-section { margin-bottom: 2rem; }
+.hot-list { display: flex; flex-direction: column; gap: 0.25rem; }
+.hot-item { display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem; background: var(--bg-card); border-radius: var(--radius-sm); }
+.hot-rank { width: 24px; text-align: center; font-weight: 600; color: var(--text-secondary); }
+.hot-thumb { width: 40px; height: 30px; border-radius: 4px; object-fit: cover; }
+.hot-desc { flex: 1; font-size: 0.85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hot-likes { color: var(--accent); font-size: 0.85rem; }
+
+/* 工具栏 */
+.toolbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1rem; }
+.toolbar-filters { display: flex; gap: 0.25rem; }
+.filter-btn {
+    padding: 0.3rem 0.75rem;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+}
+.filter-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.toolbar-search { display: flex; gap: 0.5rem; }
+.toolbar-search input, .toolbar-search select {
+    padding: 0.3rem 0.5rem;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    font-size: 0.85rem;
+}
+.batch-actions { margin-bottom: 0.5rem; }
+
+/* 数据表格 */
+.data-table { width: 100%; border-collapse: collapse; margin-bottom: 1rem; }
+.data-table th, .data-table td {
+    padding: 0.6rem 0.75rem;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.85rem;
+}
+.data-table th { color: var(--text-secondary); font-weight: 600; background: var(--bg-card); }
+.data-table tr:hover td { background: rgba(255,255,255,0.02); }
+.table-thumb { width: 60px; height: 45px; border-radius: 4px; object-fit: cover; }
+
+/* 审核详情 */
+.review-detail { display: flex; gap: 1.5rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
+.review-image { flex: 1; min-width: 300px; background: #000; border-radius: var(--radius); overflow: hidden; }
+.review-image img { width: 100%; display: block; }
+.review-info { flex: 1; min-width: 250px; }
+.review-info p { margin-bottom: 0.5rem; font-size: 0.9rem; }
+.review-form { max-width: 600px; }
+.review-actions { display: flex; gap: 0.5rem; margin-top: 1rem; }
+
+/* 登录页 */
+.login-page {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    background: var(--bg);
+}
+.login-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 2rem;
+    width: 100%;
+    max-width: 400px;
+}
+.login-card h1 { text-align: center; margin-bottom: 1.5rem; }
+
+/* 响应式 */
+@media (max-width: 768px) {
+    .admin-layout { flex-direction: column; }
+    .admin-sidebar { width: 100%; height: auto; position: relative; flex-direction: row; flex-wrap: wrap; padding: 0.5rem; }
+    .sidebar-nav { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+    .sidebar-nav a { padding: 0.4rem 0.6rem; font-size: 0.8rem; border-left: none; border-bottom: 2px solid transparent; }
+    .sidebar-nav a.active { border-bottom-color: var(--accent); border-left: none; }
+    .sidebar-brand { padding: 0.5rem; border: none; }
+    .sidebar-footer { display: none; }
+    .admin-main { padding: 1rem; }
+    .stats-grid { grid-template-columns: repeat(3, 1fr); }
+    .review-detail { flex-direction: column; }
+}

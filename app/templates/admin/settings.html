@@ -1,0 +1,109 @@
+{% extends "admin/admin_base.html" %}
+{% block title %}站点设置{% endblock %}
+
+{% block content %}
+<h1>站点设置</h1>
+
+<form method="post" action="/admin/settings" enctype="multipart/form-data">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+    <h3>基本信息</h3>
+    <div class="form-group">
+        <label>站名</label>
+        <input type="text" name="site_name" value="{{ settings.get('site_name', '') }}">
+    </div>
+    <div class="form-group">
+        <label>站点简介</label>
+        <textarea name="site_description" rows="2">{{ settings.get('site_description', '') }}</textarea>
+    </div>
+
+    <h3>Logo</h3>
+    <div class="form-group">
+        <label>大 Logo（首页）</label>
+        {% if settings.get('logo_large') %}
+        <p>当前：<img src="/uploads/{{ settings.logo_large }}" style="max-height:60px"></p>
+        {% endif %}
+        <input type="file" name="logo_large_file" accept="image/*">
+    </div>
+    <div class="form-group">
+        <label>小 Logo（导航栏/Favicon）</label>
+        {% if settings.get('logo_small') %}
+        <p>当前：<img src="/uploads/{{ settings.logo_small }}" style="max-height:30px"></p>
+        {% endif %}
+        <input type="file" name="logo_small_file" accept="image/*">
+    </div>
+
+    <h3>页脚</h3>
+    <div class="form-group">
+        <label>备案号</label>
+        <input type="text" name="footer_icp" value="{{ settings.get('footer_icp', '') }}">
+    </div>
+    <div class="form-group">
+        <label>版权信息</label>
+        <input type="text" name="footer_copyright" value="{{ settings.get('footer_copyright', '') }}">
+    </div>
+
+    <h3>外观</h3>
+    <div class="form-group">
+        <label>主题强调色</label>
+        <input type="color" name="theme_accent_color" value="{{ settings.get('theme_accent_color', '#6c5ce7') }}" style="width:60px;height:40px;padding:2px">
+        <span>{{ settings.get('theme_accent_color', '#6c5ce7') }}</span>
+    </div>
+
+    <h3>管理域名 <span style="color:#d9534f;font-size:0.8rem">（修改前请确认新域名已解析并配置 nginx）</span></h3>
+    <div class="form-group">
+        <label>管理域名（多个用逗号分隔）</label>
+        <input type="text" name="admin_domain" value="{{ settings.get('admin_domain', '') }}" placeholder="admin.example.com">
+        <p class="form-hint">修改后旧域名立即失效，请确保新域名已正确配置</p>
+    </div>
+
+    <h3>上传限制</h3>
+    <div class="form-row">
+        <div class="form-group">
+            <label>每 IP 每日上限</label>
+            <input type="number" name="upload_limit_per_ip" value="{{ settings.get('upload_limit_per_ip', '10') }}" min="1">
+        </div>
+        <div class="form-group">
+            <label>每 UA 每日上限</label>
+            <input type="number" name="upload_limit_per_ua" value="{{ settings.get('upload_limit_per_ua', '10') }}" min="0">
+        </div>
+        <div class="form-group">
+            <label>全站每日总上限</label>
+            <input type="number" name="upload_limit_daily_total" value="{{ settings.get('upload_limit_daily_total', '500') }}" min="1">
+        </div>
+    </div>
+    <div class="form-group">
+        <label>上传间隔（秒）</label>
+        <input type="number" name="upload_interval_seconds" value="{{ settings.get('upload_interval_seconds', '30') }}" min="0">
+    </div>
+
+    <h3>点赞与热度榜</h3>
+    <div class="form-row">
+        <div class="form-group">
+            <label>每 IP 每分钟点赞上限</label>
+            <input type="number" name="like_limit_per_minute" value="{{ settings.get('like_limit_per_minute', '10') }}" min="1">
+        </div>
+        <div class="form-group">
+            <label>热度榜窗口天数</label>
+            <input type="number" name="top_window_days" value="{{ settings.get('top_window_days', '30') }}" min="1">
+        </div>
+        <div class="form-group">
+            <label>热度榜展示数量</label>
+            <input type="number" name="top_show_count" value="{{ settings.get('top_show_count', '12') }}" min="1">
+        </div>
+    </div>
+
+    <h3>安全设置</h3>
+    <div class="form-group">
+        <label>敏感词列表（逗号分隔）</label>
+        <textarea name="sensitive_words" rows="2">{{ settings.get('sensitive_words', '') }}</textarea>
+    </div>
+    <div class="form-group checkbox-group">
+        <label><input type="checkbox" name="allow_author" {% if settings.get('allow_author', '1') == '1' %}checked{% endif %}> 允许署名</label>
+        <label><input type="checkbox" name="enable_captcha" {% if settings.get('enable_captcha', '0') == '1' %}checked{% endif %}> 开启上传验证码</label>
+        <label><input type="checkbox" name="enable_dedup" {% if settings.get('enable_dedup', '1') == '1' %}checked{% endif %}> 开启图片去重</label>
+    </div>
+
+    <button type="submit" class="btn btn-primary" onclick="return confirm('确定保存设置？')">保存设置</button>
+</form>
+{% endblock %}

@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}图库 - {{ site_name }}{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>图库</h1>
+    <form action="/gallery" method="get" class="search-form-inline">
+        <input type="text" name="q" placeholder="搜索简介或署名..." value="{{ query }}" class="search-input">
+        <button type="submit" class="search-btn">搜索</button>
+    </form>
+</div>
+
+{% if query %}
+<p class="search-result-info">搜索 "{{ query }}" 共 {{ total }} 张结果</p>
+{% endif %}
+
+{% if images %}
+<div class="image-grid">
+    {% for img in images %}
+    <a href="/image/{{ img.id }}" class="image-card">
+        <div class="card-img-wrap">
+            <img src="/uploads/{{ img.thumb_filename }}" alt="{{ img.description }}" loading="lazy">
+        </div>
+        <div class="card-info">
+            <p class="card-desc">{{ img.description[:50] }}{% if img.description|length > 50 %}...{% endif %}</p>
+            <p class="card-meta">
+                <span>{{ img.author or '用户' }}</span>
+                <span>{% if img.province %}{{ img.province }}{{ img.city }}{% endif %}</span>
+                <span class="like-count">&#10084; {{ img.like_count }}</span>
+            </p>
+        </div>
+    </a>
+    {% endfor %}
+</div>
+
+{% include "components/pagination.html" %}
+{% else %}
+<div class="empty-state">
+    <p>暂无图片</p>
+    {% if not query %}<a href="/upload" class="btn btn-primary">上传第一张图片</a>{% endif %}
+</div>
+{% endif %}
+{% endblock %}

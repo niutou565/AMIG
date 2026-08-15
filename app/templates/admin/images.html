@@ -1,0 +1,62 @@
+{% extends "admin/admin_base.html" %}
+{% block title %}图片管理{% endblock %}
+
+{% block content %}
+<h1>图片管理</h1>
+
+<div class="toolbar">
+    <form class="toolbar-search" method="get">
+        <select name="sort" onchange="this.form.submit()">
+            <option value="created_at_desc" {% if sort == 'created_at_desc' %}selected{% endif %}>时间倒序</option>
+            <option value="like_count_desc" {% if sort == 'like_count_desc' %}selected{% endif %}>点赞数倒序</option>
+            <option value="views_desc" {% if sort == 'views_desc' %}selected{% endif %}>浏览数倒序</option>
+        </select>
+        <input type="text" name="query" placeholder="搜索..." value="{{ query }}">
+        <button type="submit" class="btn btn-sm">搜索</button>
+    </form>
+</div>
+
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>ID</th>
+            <th>缩略图</th>
+            <th>简介</th>
+            <th>状态</th>
+            <th>点赞</th>
+            <th>浏览</th>
+            <th>时间</th>
+            <th>操作</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for img in images %}
+        <tr>
+            <td>{{ img.id }}</td>
+            <td><img src="/uploads/{{ img.thumb_filename }}" class="table-thumb" loading="lazy"></td>
+            <td>{{ img.description[:40] }}</td>
+            <td>
+                {% if img.status == 'pending' %}<span style="color:#f0ad4e">待审核</span>
+                {% else %}<span style="color:#5cb85c">已通过</span>{% endif %}
+            </td>
+            <td>{{ img.like_count }}</td>
+            <td>{{ img.views }}</td>
+            <td>{{ img.created_at[:10] }}</td>
+            <td>
+                <a href="/admin/images/{{ img.id }}" class="btn btn-sm">详情</a>
+                <form method="post" action="/admin/images/{{ img.id }}/delete" style="display:inline" onsubmit="return confirm('确定删除？将同时删除图片文件，不可恢复。')">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="btn btn-sm btn-danger">删除</button>
+                </form>
+            </td>
+        </tr>
+        {% else %}
+        <tr>
+            <td colspan="8" class="empty-tip">暂无图片</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+{% include "components/pagination.html" %}
+{% endblock %}

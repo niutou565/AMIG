@@ -1,0 +1,50 @@
+{% extends "admin/admin_base.html" %}
+{% block title %}审核 #{{ image.id }}{% endblock %}
+
+{% block content %}
+<h1>审核图片 #{{ image.id }}</h1>
+
+{% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %}
+
+<div class="review-detail">
+    <div class="review-image">
+        <img src="/uploads/{{ image.filename }}" alt="图片">
+    </div>
+    <div class="review-info">
+        <p><strong>状态：</strong>
+            {% if image.status == 'pending' %}<span style="color:#f0ad4e">待审核</span>
+            {% elif image.status == 'approved' %}<span style="color:#5cb85c">已通过</span>
+            {% else %}<span style="color:#d9534f">已拒绝</span>{% endif %}
+        </p>
+        <p><strong>上传者 IP：</strong>{{ image.ip }}</p>
+        <p><strong>地区：</strong>{{ image.province }}{{ image.city }}</p>
+        <p><strong>UA：</strong>{{ image.ua[:60] }}...</p>
+        <p><strong>上传时间：</strong>{{ image.created_at }}</p>
+        <p><strong>原始/压缩大小：</strong>{{ (image.original_size / 1024)|round|int }}KB / {{ (image.compressed_size / 1024)|round|int }}KB</p>
+        <p><strong>尺寸：</strong>{{ image.width }}x{{ image.height }}</p>
+        <p><strong>MD5：</strong>{{ image.content_md5 }}</p>
+        {% if image.is_duplicate %}<p style="color:#f0ad4e"><strong>疑似重复</strong></p>{% endif %}
+        {% if image.reject_reason %}<p><strong>拒绝理由：</strong>{{ image.reject_reason }}</p>{% endif %}
+    </div>
+</div>
+
+{% if image.status == 'pending' %}
+<form method="post" class="review-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="form-group">
+        <label>简介</label>
+        <textarea name="description" rows="3" maxlength="200">{{ image.description }}</textarea>
+    </div>
+    <div class="form-group">
+        <label>署名</label>
+        <input type="text" name="author" value="{{ image.author or '' }}" maxlength="30">
+    </div>
+    <div class="review-actions">
+        <button type="submit" name="action" value="approve" class="btn btn-success">通过</button>
+        <button type="submit" name="action" value="reject" class="btn btn-danger" onclick="return confirm('确定拒绝并删除该图片？将彻底移除图片文件，不可恢复。')">拒绝并删除</button>
+    </div>
+</form>
+{% endif %}
+{% endblock %}

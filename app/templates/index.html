@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}{{ site_name }} - 匿名图片分享{% endblock %}
+
+{% block content %}
+<div class="hero">
+    {% if logo_large %}
+    <img src="/uploads/{{ logo_large }}" alt="logo" class="hero-logo">
+    {% endif %}
+    <h1 class="hero-title">{{ site_name }}</h1>
+    <p class="hero-desc">{{ site_description }}</p>
+    <form action="/gallery" method="get" class="search-form">
+        <input type="text" name="q" placeholder="搜索图片..." class="search-input">
+        <button type="submit" class="search-btn">搜索</button>
+    </form>
+</div>
+
+{% if random_images %}
+<section class="section">
+    <h2 class="section-title">随机精选</h2>
+    <div class="image-grid">
+        {% for img in random_images %}
+        <a href="/image/{{ img.id }}" class="image-card">
+            <div class="card-img-wrap">
+                <img src="/uploads/{{ img.thumb_filename }}" alt="{{ img.description }}" loading="lazy">
+            </div>
+            <div class="card-info">
+                <p class="card-desc">{{ img.description[:50] }}{% if img.description|length > 50 %}...{% endif %}</p>
+                <p class="card-meta">
+                    <span>{{ img.author or '用户' }}</span>
+                    <span>{% if img.province %}{{ img.province }}{{ img.city }}{% endif %}</span>
+                    <span class="like-count">&#10084; {{ img.like_count }}</span>
+                </p>
+            </div>
+        </a>
+        {% endfor %}
+    </div>
+</section>
+{% endif %}
+
+{% if latest_images %}
+<section class="section">
+    <h2 class="section-title">最新通过</h2>
+    <div class="image-grid">
+        {% for img in latest_images %}
+        <a href="/image/{{ img.id }}" class="image-card">
+            <div class="card-img-wrap">
+                <img src="/uploads/{{ img.thumb_filename }}" alt="{{ img.description }}" loading="lazy">
+            </div>
+            <div class="card-info">
+                <p class="card-desc">{{ img.description[:50] }}{% if img.description|length > 50 %}...{% endif %}</p>
+                <p class="card-meta">
+                    <span>{{ img.author or '用户' }}</span>
+                    <span>{% if img.province %}{{ img.province }}{{ img.city }}{% endif %}</span>
+                    <span class="like-count">&#10084; {{ img.like_count }}</span>
+                </p>
+            </div>
+        </a>
+        {% endfor %}
+    </div>
+</section>
+{% endif %}
+
+{% if top_images %}
+<section class="section">
+    <h2 class="section-title">
+        本月热度榜
+        <a href="/top" class="section-link">查看完整榜单 &#8594;</a>
+    </h2>
+    <div class="image-grid">
+        {% for img in top_images %}
+        <a href="/image/{{ img.id }}" class="image-card">
+            <div class="card-img-wrap">
+                <span class="rank-badge {% if loop.index == 1 %}gold{% elif loop.index == 2 %}silver{% elif loop.index == 3 %}bronze{% endif %}">{{ loop.index }}</span>
+                <img src="/uploads/{{ img.thumb_filename }}" alt="{{ img.description }}" loading="lazy">
+            </div>
+            <div class="card-info">
+                <p class="card-desc">{{ img.description[:50] }}{% if img.description|length > 50 %}...{% endif %}</p>
+                <p class="card-meta">
+                    <span>{{ img.author or '用户' }}</span>
+                    <span class="like-count">&#10084; {{ img.window_likes }}</span>
+                </p>
+            </div>
+        </a>
+        {% endfor %}
+    </div>
+</section>
+{% endif %}
+{% endblock %}

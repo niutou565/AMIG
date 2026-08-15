@@ -1,0 +1,116 @@
+{% extends "admin/admin_base.html" %}
+{% block title %}用户/IP 管理{% endblock %}
+
+{% block content %}
+<h1>用户/IP 管理</h1>
+
+<h3>封禁管理</h3>
+<form method="post" action="/admin/users/ban" class="form-inline">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <select name="ban_type" required>
+        <option value="single">单个 IP</option>
+        <option value="cidr">IP 段 (CIDR)</option>
+        <option value="ua">UA 指纹</option>
+    </select>
+    <input type="text" name="target" placeholder="目标" required>
+    <input type="text" name="reason" placeholder="封禁理由" required>
+    <button type="submit" class="btn btn-danger">封禁</button>
+</form>
+
+{% if bans %}
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>类型</th>
+            <th>目标</th>
+            <th>理由</th>
+            <th>时间</th>
+            <th>操作</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for ban in bans %}
+        <tr>
+            <td>{{ ban.type }}</td>
+            <td>{{ ban.target }}</td>
+            <td>{{ ban.reason }}</td>
+            <td>{{ ban.created_at[:10] }}</td>
+            <td>
+                {% if ban.is_active %}
+                <form method="post" action="/admin/users/unban/{{ ban.id }}" style="display:inline">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="btn btn-sm">解封</button>
+                </form>
+                {% else %}
+                <span style="color:#9a9aa5">已解封</span>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+
+<h3>冷却状态</h3>
+{% if coolings %}
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>IP</th>
+            <th>拒绝次数</th>
+            <th>冷却倍数</th>
+            <th>更新时间</th>
+            <th>操作</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for c in coolings %}
+        <tr>
+            <td>{{ c.ip }}</td>
+            <td>{{ c.reject_count }}</td>
+            <td>{{ c.cooldown_multiplier }}x</td>
+            <td>{{ c.updated_at }}</td>
+            <td>
+                <form method="post" action="/admin/users/reset-cooling/{{ c.ip }}" style="display:inline">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="btn btn-sm">重置冷却</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p>无冷却记录</p>
+{% endif %}
+
+<h3>最近上传 IP</h3>
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>IP</th>
+            <th>地区</th>
+            <th>上传</th>
+            <th>通过</th>
+            <th>待审</th>
+            <th>拒绝</th>
+            <th>点赞</th>
+            <th>最后活跃</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for ip in ips %}
+        <tr>
+            <td>{{ ip.ip }}</td>
+            <td>{{ ip.province }}{{ ip.city }}</td>
+            <td>{{ ip.upload_count }}</td>
+            <td>{{ ip.approved }}</td>
+            <td>{{ ip.pending }}</td>
+            <td>{{ ip.rejected }}</td>
+            <td>{{ ip.like_count }}</td>
+            <td>{{ ip.last_active[:10] }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

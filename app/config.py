@@ -1,0 +1,53 @@
+import os
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+# 从环境变量加载
+SECRET_KEY = os.getenv("SECRET_KEY", "change-me-to-a-random-string")
+ADMIN_DOMAIN = os.getenv("ADMIN_DOMAIN", "")
+DATABASE_PATH = os.getenv("DATABASE_PATH", str(BASE_DIR / "data" / "app.db"))
+UPLOADS_DIR = os.getenv("UPLOADS_DIR", str(BASE_DIR / "uploads"))
+IP2REGION_PATH = os.getenv("IP2REGION_PATH", str(BASE_DIR / "data" / "ip2region.xdb"))
+
+# 图片限制
+MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB
+MAX_IMAGE_PIXELS = 25_000_000       # 2500万像素
+ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+MAX_DESC_LENGTH = 200
+MAX_AUTHOR_LENGTH = 30
+
+# 图片处理
+MAX_IMAGE_DIMENSION = 1920
+THUMB_DIMENSION = 480
+WEBP_QUALITY = 78
+WEBP_EFFORT = 3  # 低 effort 降低 CPU
+
+# 默认限流值
+DEFAULT_UPLOAD_PER_IP = 10
+DEFAULT_UPLOAD_PER_UA = 10
+DEFAULT_UPLOAD_DAILY_TOTAL = 500
+DEFAULT_UPLOAD_INTERVAL = 30
+DEFAULT_LIKE_PER_MINUTE = 10
+DEFAULT_TOP_WINDOW_DAYS = 30
+DEFAULT_TOP_SHOW_COUNT = 12
+
+# 热度榜缓存时间（秒）
+TOP_CACHE_TTL = 300
+
+# 登录锁定
+LOGIN_MAX_ATTEMPTS = 5
+LOGIN_LOCK_MINUTES = 15
+
+# 浏览去重窗口（秒）
+VIEW_DEDUP_WINDOW = 600
+
+# 图片去重窗口（天）
+DEDUP_WINDOW_DAYS = 30
+DEDUP_SAME_IP_HOURS = 24
+
+# 图片列表每页数量
+GALLERY_PER_PAGE = 24
+ADMIN_PER_PAGE = 24
+TOP_PER_PAGE = 24
+LIKES_PER_PAGE = 20

@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% block title %}上传图片 - {{ site_name }}{% endblock %}
+
+{% block content %}
+<div class="upload-page">
+    <h1>上传图片</h1>
+    <p class="upload-hint">图片格式支持 JPG、PNG、WebP，最大 10MB，上传后将经过审核后公开展示</p>
+
+    {% if error %}
+    <div class="alert alert-error">{{ error }}</div>
+    {% endif %}
+    {% if success %}
+    <div class="alert alert-success">{{ success }}</div>
+    {% endif %}
+
+    <form action="/upload" method="post" enctype="multipart/form-data" class="upload-form" id="uploadForm">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+        <!-- 蜜罐字段 -->
+        <div style="position:absolute;left:-9999px" aria-hidden="true">
+            <input type="text" name="honeypot" tabindex="-1" autocomplete="off">
+        </div>
+
+        <div class="upload-dropzone" id="dropzone">
+            <input type="file" name="image" id="fileInput" accept=".jpg,.jpeg,.png,.webp" required style="display:none">
+            <div class="dropzone-content" id="dropzoneContent">
+                <div class="dropzone-icon">&#128247;</div>
+                <p>拖拽图片到此处或点击选择</p>
+                <p class="dropzone-hint">JPG / PNG / WebP，最大 10MB</p>
+            </div>
+            <img id="preview" class="upload-preview" style="display:none">
+        </div>
+
+        <div class="form-group">
+            <label for="description">简介 <span class="required">*</span></label>
+            <textarea name="description" id="description" rows="3" maxlength="200" required
+                      placeholder="请简单描述这张图片..."></textarea>
+            <span class="char-count" id="descCount">0/200</span>
+        </div>
+
+        {% if allow_author %}
+        <div class="form-group">
+            <label for="author">署名（选填，不填则显示"用户"）</label>
+            <input type="text" name="author" id="author" maxlength="30" placeholder="留空则匿名">
+        </div>
+        {% endif %}
+
+        {% if enable_captcha %}
+        <div class="form-group">
+            <label>验证码：{{ captcha_a }} + {{ captcha_b }} = ?</label>
+            <input type="number" name="captcha_answer" required>
+            <input type="hidden" name="captcha_a" value="{{ captcha_a }}">
+            <input type="hidden" name="captcha_b" value="{{ captcha_b }}">
+        </div>
+        {% endif %}
+
+        <div class="form-group checkbox-group">
+            <label>
+                <input type="checkbox" name="agree" value="1" required>
+                我已阅读并同意<a href="/page/rules" target="_blank">站规</a>
+            </label>
+        </div>
+
+        <button type="submit" class="btn btn-primary btn-full" id="submitBtn">提交上传</button>
+    </form>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+    const dropzone = document.getElementById('dropzone');
+    const fileInput = document.getElementById('fileInput');
+    const preview = document.getElementById('preview');
+    const dropzoneContent = document.getElementById('dropzoneContent');
+    const descInput = document.getElementById('description');
+    const descCount = document.getElementById('descCount');
+    const form = document.getElementById('uploadForm');
+    const submitBtn = document.getElementById('submitBtn');
+
+    // 字数统计
+    if (descInput) {
+        descInput.addEventListener('input', function() {
+            descCount.textContent = this.value.length + '/200';
+        });
+    }
+
+    // 点击选择
+    dropzone.addEventListener('click', function() { fileInput.click(); });
+
+    // 拖拽
+    dropzone.addEventListener('dragover', function(e) { e.preventDefault(); dropzone.classList.add('dragover'); });
+    dropzone.addEventListener('dragleave', function() { dropzone.classList.remove('dragover'); });
+    dropzone.addEventListener('drop', function(e) {
+        e.preventDefault();
+        dropzone.classList.remove('dragover');
+        const files = e.dataTransfer.files;
+        if (files.length > 0) handleFile(files[0]);
+    });
+
+    fileInput.addEventListener('change', function() {
+        if (this.files.length > 0) handleFile(this.files[0]);
+    });
+
+    function handleFile(file) {
+        if (!file.type.match(/image\/(jpeg|png|webp)/)) {
+            alert('仅支持 JPG、PNG、WebP 格式');
+            return;
+        }
+        if (file.size > 10 * 1024 * 1024) {
+            alert('图片大小不能超过 10MB');
+            return;
+        }
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            preview.src = e.target.result;
+            preview.style.display = 'block';
+            dropzoneContent.style.display = 'none';
+        };
+        reader.readAsDataURL(file);
+    }
+
+    form.addEventListener('submit', function() {
+        submitBtn.disabled = true;
+        submitBtn.textContent = '上传中...';
+    });
+})();
+</script>
+{% endblock %}

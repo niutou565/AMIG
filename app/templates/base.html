@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}{{ site_name }}{% endblock %}</title>
+    <meta name="description" content="{{ site_description }}">
+    <link rel="icon" href="{% if logo_small %}/uploads/{{ logo_small }}{% endif %}" type="image/webp">
+    <link rel="stylesheet" href="/static/css/dark.css">
+    <style>
+        :root {
+            --accent: {{ accent_color }};
+        }
+    </style>
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-inner">
+            <a href="/" class="nav-brand">
+                {% if logo_small %}<img src="/uploads/{{ logo_small }}" alt="logo" class="nav-logo-small">{% endif %}
+                <span class="nav-site-name">{{ site_name }}</span>
+            </a>
+            <div class="nav-links" id="navLinks">
+                <a href="/gallery">查看全部图片</a>
+                <a href="/top">热度榜</a>
+                <a href="/upload" class="btn-upload">上传图片</a>
+            </div>
+            <button class="nav-toggle" id="navToggle" aria-label="菜单">&#9776;</button>
+        </div>
+    </nav>
+
+    <main class="main-content">
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer class="site-footer">
+        <div class="footer-inner">
+            {% if links %}
+            <div class="footer-links">
+                {% for link in links %}
+                <a href="{{ link.url }}" target="_blank" rel="noopener noreferrer">{{ link.name }}</a>
+                {% endfor %}
+            </div>
+            {% endif %}
+            {% if pages %}
+            <div class="footer-pages">
+                {% for p in pages %}
+                <a href="/page/{{ p.slug }}">{{ p.title }}</a>
+                {% endfor %}
+            </div>
+            {% endif %}
+            {% if footer_copyright %}<p class="footer-copyright">{{ footer_copyright }}</p>{% endif %}
+            {% if footer_icp %}<p class="footer-icp">{{ footer_icp }}</p>{% endif %}
+        </div>
+    </footer>
+
+    <script src="/static/js/main.js"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

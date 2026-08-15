@@ -1,0 +1,39 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# ===== 本地环境配置（勿提交真实密钥）=====
+.env
+
+# ===== SQLite 数据库 =====
+data/*.db
+data/*.db-shm
+data/*.db-wal
+
+# ===== IP 离线库（需自行下载，体积较大）=====
+data/ip2region.xdb
+
+# ===== 上传的图片（用户内容，勿提交）=====
+uploads/*
+!uploads/.gitkeep
+
+# ===== 日志 =====
+*.log
+logs/
+
+# ===== 编辑器 / IDE =====
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# ===== 构建产物 =====
+build/
+dist/
+*.egg
+node_modules/

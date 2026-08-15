@@ -1,0 +1,62 @@
+{% extends "admin/admin_base.html" %}
+{% block title %}友情链接{% endblock %}
+
+{% block content %}
+<h1>友情链接</h1>
+
+<h3>新增/编辑</h3>
+<form method="post" action="/admin/links/save" class="form-inline">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="link_id" id="editLinkId">
+    <input type="text" name="name" id="editName" placeholder="名称" required>
+    <input type="url" name="url" id="editUrl" placeholder="https://..." required>
+    <input type="number" name="sort_order" id="editSort" value="0" placeholder="排序" style="width:70px">
+    <select name="is_visible" id="editVisible">
+        <option value="1">显示</option>
+        <option value="0">隐藏</option>
+    </select>
+    <button type="submit" class="btn btn-primary">保存</button>
+</form>
+
+<h3>列表</h3>
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>名称</th>
+            <th>URL</th>
+            <th>排序</th>
+            <th>状态</th>
+            <th>操作</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for link in links %}
+        <tr>
+            <td>{{ link.name }}</td>
+            <td>{{ link.url[:50] }}</td>
+            <td>{{ link.sort_order }}</td>
+            <td>{{ '显示' if link.is_visible else '隐藏' }}</td>
+            <td>
+                <button class="btn btn-sm" onclick="editLink({{ link.id }}, '{{ link.name }}', '{{ link.url }}', {{ link.sort_order }}, {{ link.is_visible }})">编辑</button>
+                <form method="post" action="/admin/links/delete/{{ link.id }}" style="display:inline" onsubmit="return confirm('确定删除？')">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="btn btn-sm btn-danger">删除</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function editLink(id, name, url, sort, visible) {
+    document.getElementById('editLinkId').value = id;
+    document.getElementById('editName').value = name;
+    document.getElementById('editUrl').value = url;
+    document.getElementById('editSort').value = sort;
+    document.getElementById('editVisible').value = visible;
+}
+</script>
+{% endblock %}

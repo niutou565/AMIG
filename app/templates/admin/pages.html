@@ -1,0 +1,38 @@
+{% extends "admin/admin_base.html" %}
+{% block title %}页面管理{% endblock %}
+
+{% block content %}
+<h1>页面管理</h1>
+<p><a href="/admin/pages/edit" class="btn btn-primary">新增页面</a></p>
+
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>标题</th>
+            <th>Slug</th>
+            <th>排序</th>
+            <th>状态</th>
+            <th>更新时间</th>
+            <th>操作</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for p in pages %}
+        <tr>
+            <td>{{ p.title }}</td>
+            <td>{{ p.slug }}</td>
+            <td>{{ p.sort_order }}</td>
+            <td>{{ '显示' if p.is_visible else '隐藏' }}</td>
+            <td>{{ p.updated_at[:10] }}</td>
+            <td>
+                <a href="/admin/pages/edit/{{ p.id }}" class="btn btn-sm">编辑</a>
+                <form method="post" action="/admin/pages/delete/{{ p.id }}" style="display:inline" onsubmit="return confirm('确定删除？')">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="btn btn-sm btn-danger">删除</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}
