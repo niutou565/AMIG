@@ -11,13 +11,16 @@ def init_ip2region():
         print(f"[WARN] ip2region.xdb not found at {IP2REGION_PATH}, IP geo disabled")
         return
     try:
-        from ip2region import xdbSearcher
-        _searcher = xdbSearcher.loadVectorIndexFromFile(IP2REGION_PATH)
+        # 使用项目内置的纯 Python 实现（app/xdbSearcher.py），无需外部依赖
+        from app.xdbSearcher import loadVectorIndexFromFile
+        vi = loadVectorIndexFromFile(IP2REGION_PATH)
+        from app.xdbSearcher import XdbSearcher
+        _searcher = XdbSearcher(dbfile=IP2REGION_PATH, vectorIndex=vi)
         print(f"[INFO] ip2region loaded from {IP2REGION_PATH}")
-    except ImportError:
-        print("[WARN] xdbSearcher module not available, IP geo disabled")
+    except ImportError as e:
+        print(f"[WARN] xdbSearcher module not available: {e}, IP geo disabled")
     except Exception as e:
-        print(f"[WARN] Failed to load ip2region: {e}")
+        print(f"[WARN] Failed to load ip2region: {e}, IP geo disabled")
 
 
 def get_ip_location(ip: str):
