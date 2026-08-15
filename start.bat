@@ -104,11 +104,6 @@ if not exist "%SCRIPT_DIR%.env" (
     echo [OK] .env config file exists
 )
 
-findstr /C:"SECRET_KEY=change-me" "%SCRIPT_DIR%.env" >nul 2>&1
-if %errorlevel% equ 0 (
-    echo [WARN] SECRET_KEY is still the default value, consider changing it
-)
-
 :: ========== Step 6: Initialize Database ==========
 echo.
 echo [*] Initializing database...

@@ -1,4 +1,5 @@
 import hashlib
+import time
 import uuid
 from datetime import datetime, timezone, timedelta
 from app.database import get_db
@@ -200,7 +201,7 @@ def check_content_md5_duplicate(content_md5, ip, window_hours=24, window_days=30
     db = get_db()
     # 同一 IP 24小时内
     from datetime import datetime, timezone, timedelta
-    cutoff_ip = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).strftime("%Y-%m-%dT%H:%M:%S")
+    cutoff_ip = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).isoformat(timespec="seconds")
     same_ip = db.execute(
         "SELECT id FROM images WHERE content_md5=? AND ip=? AND created_at > ?",
         (content_md5, ip, cutoff_ip)
@@ -208,7 +209,7 @@ def check_content_md5_duplicate(content_md5, ip, window_hours=24, window_days=30
     if same_ip:
         return True
     # 全站 30天内
-    cutoff_site = (datetime.now(timezone.utc) - timedelta(days=window_days)).strftime("%Y-%m-%dT%H:%M:%S")
+    cutoff_site = (datetime.now(timezone.utc) - timedelta(days=window_days)).isoformat(timespec="seconds")
     site_dup = db.execute(
         "SELECT id FROM images WHERE content_md5=? AND created_at > ?",
         (content_md5, cutoff_site)
@@ -279,13 +280,33 @@ def delete_likes_by_ids(like_ids):
 
 def count_likes_by_ip_last_minute(ip):
     from datetime import datetime, timezone, timedelta
-    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%S")
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(timespec="seconds")
     return get_db().execute(
         "SELECT COUNT(*) FROM likes WHERE ip=? AND created_at > ?", (ip, cutoff)
     ).fetchone()[0]
 
 
 # ========== ban_list ==========
+
+# CIDR 封禁缓存：避免每次请求都查询并遍历全部 CIDR 规则
+_cidr_cache = {"targets": None, "ts": 0}
+_CIDR_CACHE_TTL = 60
+
+
+def _get_active_cidr_targets():
+    now = time.time()
+    if _cidr_cache["targets"] is None or (now - _cidr_cache["ts"]) > _CIDR_CACHE_TTL:
+        rows = get_db().execute(
+            "SELECT target FROM ban_list WHERE type='cidr' AND is_active=1"
+        ).fetchall()
+        _cidr_cache["targets"] = [r["target"] for r in rows]
+        _cidr_cache["ts"] = now
+    return _cidr_cache["targets"]
+
+
+def _invalidate_cidr_cache():
+    _cidr_cache["targets"] = None
+
 
 def is_banned(ip, ua_hash_val):
     db = get_db()
@@ -301,12 +322,9 @@ def is_banned(ip, ua_hash_val):
     ).fetchone()
     if row:
         return True
-    # 检查 CIDR 封禁
-    rows = db.execute(
-        "SELECT target FROM ban_list WHERE type='cidr' AND is_active=1"
-    ).fetchall()
-    for r in rows:
-        if ip_in_cidr(ip, r["target"]):
+    # 检查 CIDR 封禁（带缓存）
+    for target in _get_active_cidr_targets():
+        if ip_in_cidr(ip, target):
             return True
     return False
 
@@ -332,12 +350,14 @@ def add_ban(target, ban_type, reason, admin_id):
         (target, ban_type, reason, admin_id, now_iso())
     )
     db.commit()
+    _invalidate_cidr_cache()
 
 
 def remove_ban(ban_id):
     db = get_db()
     db.execute("UPDATE ban_list SET is_active=0 WHERE id=?", (ban_id,))
     db.commit()
+    _invalidate_cidr_cache()
 
 
 # ========== admins ==========
@@ -518,7 +538,7 @@ def get_top_like_provinces(limit=10):
 def get_top_images_by_likes(limit=10, window_days=None):
     if window_days:
         from datetime import datetime, timezone, timedelta
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)).strftime("%Y-%m-%dT%H:%M:%S")
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)).isoformat(timespec="seconds")
         return get_db().execute(
             """SELECT i.*, COUNT(l.id) as window_likes
                FROM images i
@@ -538,7 +558,7 @@ def get_top_images_by_likes(limit=10, window_days=None):
 
 def get_active_ip_count(days=7):
     from datetime import datetime, timezone, timedelta
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
     return get_db().execute(
         "SELECT COUNT(DISTINCT ip) FROM likes WHERE created_at > ?", (cutoff,)
     ).fetchone()[0]
@@ -577,7 +597,7 @@ def count_admin_logs():
 def should_count_view(image_id, ip):
     """检查是否10分钟内重复浏览"""
     from datetime import datetime, timezone, timedelta
-    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=600)).strftime("%Y-%m-%dT%H:%M:%S")
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=600)).isoformat(timespec="seconds")
     db = get_db()
     existing = db.execute(
         "SELECT id FROM view_sessions WHERE image_id=? AND ip=? AND viewed_at > ?",
@@ -635,7 +655,7 @@ def get_all_cooling():
 def get_top_images(window_days, show_count, limit=None, offset=0):
     """获取窗口内热度榜数据"""
     from datetime import datetime, timezone, timedelta
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)).strftime("%Y-%m-%dT%H:%M:%S")
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)).isoformat(timespec="seconds")
     db = get_db()
     if limit is None:
         limit = show_count
@@ -654,7 +674,7 @@ def get_top_images(window_days, show_count, limit=None, offset=0):
 
 def count_top_images(window_days):
     from datetime import datetime, timezone, timedelta
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)).strftime("%Y-%m-%dT%H:%M:%S")
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)).isoformat(timespec="seconds")
     return get_db().execute(
         """SELECT COUNT(DISTINCT i.id)
            FROM images i

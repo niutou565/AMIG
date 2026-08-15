@@ -3,7 +3,7 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# 从 .env 文件加载环境变量（必须在读取 os.getenv 之前执行，否则 SECRET_KEY/ADMIN_DOMAIN 等不生效）
+# 从 .env 文件加载环境变量（必须在读取 os.getenv 之前执行，否则 ADMIN_DOMAIN 等不生效）
 _env_path = BASE_DIR / ".env"
 if _env_path.exists():
     with open(_env_path, "r", encoding="utf-8") as _f:
@@ -17,7 +17,6 @@ if _env_path.exists():
                     os.environ[_k] = _v
 
 # 从环境变量加载
-SECRET_KEY = os.getenv("SECRET_KEY", "change-me-to-a-random-string")
 ADMIN_DOMAIN = os.getenv("ADMIN_DOMAIN", "")
 DATABASE_PATH = os.getenv("DATABASE_PATH", str(BASE_DIR / "data" / "app.db"))
 UPLOADS_DIR = os.getenv("UPLOADS_DIR", str(BASE_DIR / "uploads"))

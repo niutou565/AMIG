@@ -46,13 +46,21 @@ def get_ip_location(ip: str):
 
 
 def get_client_ip(request):
-    """获取客户端真实 IP"""
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
+    """获取客户端真实 IP
+
+    优先级：CF-Connecting-IP（Cloudflare）> X-Real-IP（Nginx 设置的 $remote_addr）
+    > X-Forwarded-For 末位（由最近可信代理追加）> 直连地址。
+    不信任 X-Forwarded-For 的首个值，避免客户端伪造 IP 绕过限流/封禁。
+    """
+    cf_ip = request.headers.get("CF-Connecting-IP")
+    if cf_ip:
+        return cf_ip.strip()
     real_ip = request.headers.get("X-Real-IP")
     if real_ip:
         return real_ip.strip()
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[-1].strip()
     if request.client:
         return request.client.host
     return "127.0.0.1"

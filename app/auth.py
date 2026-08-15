@@ -3,7 +3,7 @@ import hashlib
 import secrets
 from datetime import datetime, timezone, timedelta
 from app.models import get_admin_by_username, update_admin_login_attempts, get_admin_by_id
-from app.config import SECRET_KEY, LOGIN_MAX_ATTEMPTS, LOGIN_LOCK_MINUTES
+from app.config import LOGIN_MAX_ATTEMPTS, LOGIN_LOCK_MINUTES
 
 # 简单的内存 Session 存储 {session_id: {admin_id, username, expires_at}}
 _sessions = {}

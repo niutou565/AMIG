@@ -75,7 +75,6 @@ vim .env
 必填项：
 
 ```ini
-SECRET_KEY=<至少32位的随机字符串>
 ADMIN_DOMAIN=admin.91bus.top
 ```
 
@@ -86,8 +85,6 @@ DATABASE_PATH=data/app.db
 UPLOADS_DIR=uploads
 IP2REGION_PATH=data/ip2region.xdb
 ```
-
-> `SECRET_KEY` 请使用强随机值，例如：`python -c "import secrets; print(secrets.token_hex(32))"`。
 
 ### 3.3 放置 IP 归属地库（可选）
 
@@ -122,7 +119,6 @@ After=network.target
 Type=simple
 User=www-data
 WorkingDirectory=/www/wwwroot/91bus
-Environment="SECRET_KEY=<你的密钥>"
 Environment="ADMIN_DOMAIN=admin.91bus.top"
 Environment="WORKERS=1"
 ExecStart=/www/wwwroot/91bus/venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
@@ -223,7 +219,7 @@ A：Python 进程不会热加载，务必 `sudo systemctl restart 91bus.service`
 
 ## 5. 注意事项
 
-1. **密钥安全**：`.env` 已被 `.gitignore` 排除，`git pull` 不会覆盖服务器上的真实 `.env`；`SECRET_KEY` 切勿提交。
+1. **配置安全**：`.env` 已被 `.gitignore` 排除，`git pull` 不会覆盖服务器上的真实 `.env`。
 2. **端口隔离**：uvicorn 仅绑定 `127.0.0.1:8000`，不对外暴露 8000 端口。
 3. **防火墙**：仅开放 80/443。
 4. **上传目录安全**：`/uploads/` 建议禁止执行脚本（PHP 等）。

@@ -3,7 +3,7 @@ import re
 from fastapi import APIRouter, Request, Form, File, UploadFile, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
-from app.config import BASE_DIR, ADMIN_PER_PAGE, LIKES_PER_PAGE, MAX_DESC_LENGTH
+from app.config import BASE_DIR, ADMIN_PER_PAGE, LIKES_PER_PAGE, MAX_DESC_LENGTH, UPLOADS_DIR
 from app.models import (
     get_images_by_status, count_images_by_status, get_image_by_id,
     update_image_status, update_image_description, delete_image, get_all_links, get_link_by_id,
@@ -29,6 +29,24 @@ import json
 
 router = APIRouter(prefix="/admin")
 templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
+
+# Logo 允许的扩展名
+ALLOWED_LOGO_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".ico", ".svg"}
+
+
+async def _save_logo(upload_file, prefix):
+    """保存上传的 Logo 到 UPLOADS_DIR，返回文件名；非法扩展名或空文件返回 None"""
+    if not (hasattr(upload_file, "filename") and upload_file.filename):
+        return None
+    import uuid
+    ext = os.path.splitext(upload_file.filename)[1].lower()
+    if ext not in ALLOWED_LOGO_EXTS:
+        return None
+    logo_name = f"{prefix}_{uuid.uuid4().hex}{ext}"
+    os.makedirs(UPLOADS_DIR, exist_ok=True)
+    with open(os.path.join(UPLOADS_DIR, logo_name), "wb") as f:
+        f.write(await upload_file.read())
+    return logo_name
 
 
 def admin_required(request: Request):
@@ -459,25 +477,13 @@ async def admin_settings_save(request: Request, csrf_token: str = Form("")):
         set_setting("admin_domain", new_admin_domain)
         insert_admin_log(admin["id"], admin["username"], "config", f"管理域名: {old_admin_domain} -> {new_admin_domain}")
 
-    # 上传 logo
-    logo_large = form.get("logo_large_file")
-    if hasattr(logo_large, "filename") and logo_large.filename:
-        import uuid
-        ext = os.path.splitext(logo_large.filename)[1]
-        logo_name = f"logo_large_{uuid.uuid4().hex}{ext}"
-        logo_path = os.path.join("uploads", logo_name)
-        with open(logo_path, "wb") as f:
-            f.write(await logo_large.read())
+    # 上传 logo（校验扩展名并使用 UPLOADS_DIR 绝对路径）
+    logo_name = await _save_logo(form.get("logo_large_file"), "logo_large")
+    if logo_name:
         set_setting("logo_large", logo_name)
 
-    logo_small = form.get("logo_small_file")
-    if hasattr(logo_small, "filename") and logo_small.filename:
-        import uuid
-        ext = os.path.splitext(logo_small.filename)[1]
-        logo_name = f"logo_small_{uuid.uuid4().hex}{ext}"
-        logo_path = os.path.join("uploads", logo_name)
-        with open(logo_path, "wb") as f:
-            f.write(await logo_small.read())
+    logo_name = await _save_logo(form.get("logo_small_file"), "logo_small")
+    if logo_name:
         set_setting("logo_small", logo_name)
 
     # 重新加载敏感词

@@ -63,7 +63,7 @@
 | 用户/IP 管理 | 封禁单个 IP、IP 段（CIDR）、UA 指纹；查看与解除冷却状态 |
 | 站点设置 | 站名、简介、Logo、备案号、版权、强调色、限流参数、热度榜参数、验证码开关、去重开关、敏感词、管理域名 |
 | 友情链接 | 增删改、排序、显隐控制 |
-| 页面管理 | 自定义页面增删改，内容支持 Markdown/HTML |
+| 页面管理 | 自定义页面增删改，内容支持 HTML（换行自动转为 `<br>`） |
 | 操作日志 | 记录所有管理员操作，可追溯 |
 | 修改密码 | 无需原密码，输入新密码 + 确认即可修改 |
 
@@ -187,7 +187,6 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `SECRET_KEY` | 站点密钥，请改为随机字符串 | 占位值 |
 | `ADMIN_DOMAIN` | 管理域名，多个逗号分隔，上线必填 | 空 |
 | `DATABASE_PATH` | 数据库路径 | `data/app.db` |
 | `UPLOADS_DIR` | 上传目录 | `uploads` |
@@ -196,6 +195,8 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ---
 
 ## 生产环境部署
+
+> 更详细的生产部署步骤（宝塔面板 + systemd + 真实路径）见 [DEPLOY.md](DEPLOY.md)。
 
 ### 架构说明
 
@@ -314,7 +315,7 @@ location /static/ {
 
 ### systemd 服务
 
-创建 `/etc/systemd/system/pic-share.service`：
+创建 `/etc/systemd/system/91bus.service`：
 
 ```ini
 [Unit]
@@ -325,7 +326,6 @@ After=network.target
 Type=simple
 User=www-data
 WorkingDirectory=/path/to/bus
-Environment="SECRET_KEY=your-secret-key"
 Environment="ADMIN_DOMAIN=admin.example.com"
 ExecStart=/usr/bin/python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
 Restart=always
@@ -337,8 +337,8 @@ WantedBy=multi-user.target
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable pic-share
-sudo systemctl start pic-share
+sudo systemctl enable 91bus
+sudo systemctl start 91bus
 ```
 
 ### 安全建议
@@ -355,7 +355,6 @@ sudo systemctl start pic-share
    ```bash
    tar -czf backup-$(date +%Y%m%d).tar.gz data/app.db uploads/
    ```
-5. **修改默认密钥**：`.env` 中 `SECRET_KEY` 务必改为强随机值
 
 ---
 
