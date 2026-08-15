@@ -17,6 +17,28 @@
 | 进程管理 | systemd |
 | 可选 | `data/ip2region.xdb`（IP 归属地离线库，缺失仅停用该功能） |
 
+### 资源占用参考（实测）
+
+| 项目 | 占用 | 说明 |
+|---|---|---|
+| 纯源码（约 60 个文件） | ~0.25 MB | 不含 `.git` / 虚拟环境 / 数据 |
+| Python 虚拟环境 + 依赖 | ~80–120 MB | Pillow、FastAPI 及传递依赖 |
+| `ip2region.xdb`（可选） | ~11 MB | IP 归属地离线库 |
+| SQLite 数据库 | 数 KB ~ 数十 MB | 随图片记录数量增长 |
+| 运行内存（4 workers 实测） | ~125 MB | 峰值约 125 MB；1 worker 约 30–40 MB |
+| 图片处理瞬时内存 | +100–200 MB | 大图缩放/转码时短暂增加 |
+
+### 最低配置要求
+
+| 规格 | 最低 | 推荐 |
+|---|---|---|
+| CPU | 1 核 | 2 核 |
+| 内存 | 512 MB（1 worker） | 1 GB（4 workers） |
+| 硬盘 | 1 GB（不含用户图片） | 10 GB 起（含图片存储） |
+| 系统 | Linux（Debian/Ubuntu/CentOS） | Ubuntu 22.04+ / Debian 12+ |
+
+> 硬盘需求主要取决于用户上传的图片数量。按单张 WebP 约 100–500 KB 估算，预留足够空间即可。云服务器常见的「1 核 1 GB、20 GB 系统盘」起步即可流畅运行；若流量较大，建议 2 核 2 GB。
+
 > ⚠️ 请勿使用宝塔面板的「Python 项目管理器」直接创建/运行本项目，其系统 Python 3.7 的 pip 元数据存在已知问题。请使用命令行 + 独立虚拟环境部署。
 
 ---
@@ -88,6 +110,10 @@ IP2REGION_PATH=data/ip2region.xdb
 # 默认 127.0.0.1,::1,localhost；如使用 Cloudflare 需把其回源 IP 段加入
 TRUSTED_PROXIES=127.0.0.1,::1,localhost
 ```
+
+> **后台域名可动态修改**：登录后台「站点设置 → 管理域名」修改后立即生效（无需重启服务，中间件每次请求实时读取数据库）。但有两点必须注意：
+> 1. **并集生效**：`.env` / systemd 的 `ADMIN_DOMAIN` 与数据库 `admin_domain` 是**并集**（都会被放行），不会互相覆盖。若想彻底停用旧域名，需同时更新 `.env`、systemd 的 `Environment` 与数据库三处。
+> 2. **先解析 + 配置 Nginx**：改为新域名前，必须先完成 DNS 解析，并把新域名加入 Nginx 的 `server_name`，否则新域名无法访问到应用。
 
 ### 3.3 放置 IP 归属地库（可选）
 
@@ -224,6 +250,21 @@ A：未放置 `data/ip2region.xdb`，或未重启服务。放置后重启即可�
 
 **Q：代码更新后不生效？**
 A：Python 进程不会热加载，务必 `sudo systemctl restart 91bus.service`。
+
+**Q：后台改了管理域名，旧域名为什么还能访问后台？**
+A：管理域名是「并集」生效——`.env` / systemd 的 `ADMIN_DOMAIN` 与数据库 `admin_domain` 都会被放行，后台修改只覆盖数据库，不会删除 `.env` 里的旧域名。要彻底停用旧域名，需同时更新 `.env`、systemd 的 `Environment`、数据库三处后重启。
+
+**Q：如何验证数据库迁移是否成功？**
+A：服务启动时自动迁移，用下面命令核对关键结构（`PRAGMA table_info` 返回元组，字段名在第二列，用 `r[1]` 取值）：
+
+```bash
+cd /www/wwwroot/91bus && python3 -c "import sqlite3; c=sqlite3.connect('data/app.db'); cols={r[1] for r in c.execute('PRAGMA table_info(images)').fetchall()}; print('字段:', all(x in cols for x in ['title','region','ip','like_count','views'])); print('sessions 表:', bool(c.execute(\"SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'\").fetchone())); c.close()"
+```
+
+预期输出均为 `True`，即迁移完成。
+
+**Q：双域名隔离靠什么实现？需要 Nginx 单独配置吗？**
+A：由应用层中间件 `AdminDomainMiddleware` 保证——非白名单域名访问 `/admin` 直接返回 404，无需在 Nginx 单独加 `location /admin { return 404; }`。多个域名共用同一个 Nginx `server` 块也能正确隔离；Nginx 层的 `location /admin` 只是可选的纵深防御。
 
 ---
 
