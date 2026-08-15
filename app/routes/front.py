@@ -3,7 +3,7 @@ from fastapi import APIRouter, Request, Form, File, UploadFile, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, Response, FileResponse
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
-from app.config import BASE_DIR, MAX_DESC_LENGTH, MAX_AUTHOR_LENGTH, GALLERY_PER_PAGE
+from app.config import BASE_DIR, MAX_DESC_LENGTH, MAX_TITLE_LENGTH, MAX_AUTHOR_LENGTH, GALLERY_PER_PAGE, MAX_UPLOAD_SIZE
 from app.models import (
     get_random_approved_images, get_latest_approved_images,
     search_approved_images, count_search_approved_images,
@@ -18,15 +18,26 @@ from app.models import (
     increment_daily_stat, today_str,
 )
 from app.stats import get_top_cached
-from app.ip_geo import get_client_ip, get_ip_location
+from app.ip_geo import get_client_ip, get_ip_location, get_ip_region
 from app.limiter import check_upload_limit
 from app.ban import check_ban_status
 from app.image_utils import validate_image, process_image
 from app.middleware import check_sensitive
+from app.display import uploader_label
 import os
+import threading
 
 router = APIRouter()
 templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
+templates.env.filters["uploader_label"] = uploader_label
+
+# 限制并发图片处理数量，避免大量并发上传耗尽线程池与 CPU
+_upload_semaphore = threading.Semaphore(4)
+
+
+def _process_image_limited(file_data):
+    with _upload_semaphore:
+        return process_image(file_data)
 
 
 def get_settings_context():
@@ -70,17 +81,25 @@ async def index(request: Request):
 # ========== 图库 ==========
 
 @router.get("/gallery", response_class=HTMLResponse)
-async def gallery(request: Request, q: str = "", page: int = 1):
+async def gallery(request: Request, q: str = "", page: int = 1, sort: str = "latest"):
     ctx = get_common_context(request)
     offset = (page - 1) * GALLERY_PER_PAGE
+    sort_order_map = {
+        "hot": "like_count DESC",
+        "latest": "created_at DESC",
+        "oldest": "created_at ASC",
+    }
+    order_by = sort_order_map.get(sort, "created_at DESC")
+
     if q:
         images = search_approved_images(q, GALLERY_PER_PAGE, offset)
         total = count_search_approved_images(q)
     else:
-        images = get_images_by_status("approved", GALLERY_PER_PAGE, offset, "reviewed_at DESC")
+        images = get_images_by_status("approved", GALLERY_PER_PAGE, offset, order_by)
         total = count_images_by_status("approved")
     ctx["images"] = images
     ctx["query"] = q
+    ctx["sort"] = sort
     ctx["page"] = page
     ctx["total"] = total
     ctx["total_pages"] = max(1, (total + GALLERY_PER_PAGE - 1) // GALLERY_PER_PAGE)
@@ -132,20 +151,6 @@ async def image_detail(request: Request, image_id: int):
     ctx["likes"] = get_likes_by_image(image_id, LIKES_PER_PAGE, 0)
     ctx["likes_count"] = count_likes_by_image(image_id)
 
-    # 上一张/下一张
-    from app.database import get_db
-    db = get_db()
-    prev_row = db.execute(
-        "SELECT id FROM images WHERE status='approved' AND reviewed_at < ? ORDER BY reviewed_at DESC LIMIT 1",
-        (image["reviewed_at"],)
-    ).fetchone()
-    next_row = db.execute(
-        "SELECT id FROM images WHERE status='approved' AND reviewed_at > ? ORDER BY reviewed_at ASC LIMIT 1",
-        (image["reviewed_at"],)
-    ).fetchone()
-    ctx["prev_id"] = prev_row[0] if prev_row else None
-    ctx["next_id"] = next_row[0] if next_row else None
-
     return templates.TemplateResponse(request, "image_detail.html", ctx)
 
 
@@ -172,6 +177,7 @@ async def upload_page(request: Request):
 async def upload_action(
     request: Request,
     image: UploadFile = File(...),
+    title: str = Form(""),
     description: str = Form(""),
     author: str = Form(""),
     agree: str = Form(""),
@@ -206,16 +212,17 @@ async def upload_action(
             return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "验证码错误"})
 
     # 输入校验
+    title = title.strip()[:MAX_TITLE_LENGTH]
     description = description.strip()[:MAX_DESC_LENGTH]
     author = author.strip()[:MAX_AUTHOR_LENGTH]
     if not get_setting("allow_author", "1") == "1":
         author = ""
 
-    if not description:
-        return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "请输入简介"})
+    if not title:
+        return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "请输入标题"})
 
     # 敏感词检查
-    if check_sensitive(description) or (author and check_sensitive(author)):
+    if check_sensitive(title) or check_sensitive(description) or (author and check_sensitive(author)):
         return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "内容包含敏感词，请修改后重试"})
 
     ip = get_client_ip(request)
@@ -232,8 +239,21 @@ async def upload_action(
     if not allowed:
         return templates.TemplateResponse(request, "upload.html", {**ctx, "error": limit_msg})
 
-    # 读取文件
-    file_data = await image.read()
+    # 预检 Content-Length（粗略拦截超大请求，避免先完整读入内存）
+    content_length = request.headers.get("content-length", "")
+    if content_length.isdigit() and int(content_length) > MAX_UPLOAD_SIZE + 1024 * 1024:
+        return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "图片大小超过限制"})
+
+    # 分块读取文件，边读边限制大小
+    file_data = b""
+    while True:
+        chunk = await image.read(1024 * 1024)
+        if not chunk:
+            break
+        file_data += chunk
+        if len(file_data) > MAX_UPLOAD_SIZE:
+            return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "图片大小超过限制"})
+
     if not file_data:
         return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "请选择图片文件"})
 
@@ -242,8 +262,8 @@ async def upload_action(
     if not valid:
         return templates.TemplateResponse(request, "upload.html", {**ctx, "error": err_msg})
 
-    # 处理图片（在独立线程池中执行，避免阻塞事件循环）
-    result, err_msg = await run_in_threadpool(process_image, file_data)
+    # 处理图片（在独立线程池中执行，避免阻塞事件循环；并发受信号量限制）
+    result, err_msg = await run_in_threadpool(_process_image_limited, file_data)
     if not result:
         return templates.TemplateResponse(request, "upload.html", {**ctx, "error": f"图片处理失败：{err_msg}"})
 
@@ -253,12 +273,13 @@ async def upload_action(
         if is_dup:
             from app.models import insert_image
             province, city = get_ip_location(ip)
+            region = get_ip_region(ip)
             img_id = insert_image(
                 result["filename"], result["thumb_filename"],
                 result["original_size"], result["compressed_size"],
                 result["width"], result["height"],
                 description, author, result["content_md5"],
-                ip, ua_val, ua_hash_val, province, city, is_dup=1
+                ip, ua_val, ua_hash_val, province, city, is_dup=1, title=title, region=region
             )
             increment_daily_stat(today_str(), "upload_count")
             return templates.TemplateResponse(request, "upload.html", {
@@ -267,13 +288,14 @@ async def upload_action(
 
     # 存库
     province, city = get_ip_location(ip)
+    region = get_ip_region(ip)
     from app.models import insert_image
     img_id = insert_image(
         result["filename"], result["thumb_filename"],
         result["original_size"], result["compressed_size"],
         result["width"], result["height"],
         description, author, result["content_md5"],
-        ip, ua_val, ua_hash_val, province, city
+        ip, ua_val, ua_hash_val, province, city, title=title, region=region
     )
 
     # 更新统计

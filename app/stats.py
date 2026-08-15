@@ -4,8 +4,8 @@ from app.models import (
     get_top_images, get_setting_int, get_setting, get_daily_stats,
     get_stats_range, get_top_like_provinces, get_top_images_by_likes,
     get_active_ip_count, get_ban_count, count_images_by_status,
-    count_uploads_today_total, increment_daily_stat, ensure_daily_stats,
-    today_str
+    count_images_total, count_uploads_today_total, increment_daily_stat,
+    ensure_daily_stats, today_str
 )
 from app.config import DEFAULT_TOP_WINDOW_DAYS, DEFAULT_TOP_SHOW_COUNT, TOP_CACHE_TTL
 
@@ -41,6 +41,9 @@ def get_dashboard_data():
     today_stats = get_daily_stats(today)
 
     pending = count_images_by_status("pending")
+    approved = count_images_by_status("approved")
+    rejected = count_images_by_status("rejected")
+    total_images = count_images_total()
 
     today_row = today_stats if today_stats else {
         "upload_count": 0, "approved_count": 0, "rejected_count": 0,
@@ -69,6 +72,9 @@ def get_dashboard_data():
     return {
         "today": today_row,
         "pending": pending,
+        "approved": approved,
+        "rejected": rejected,
+        "total_images": total_images,
         "pass_rate": pass_rate,
         "stats_7d": stats_7d,
         "stats_30d": stats_30d,

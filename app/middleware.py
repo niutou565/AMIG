@@ -27,7 +27,7 @@ def is_admin_access(request) -> bool:
         return True
     domains = get_admin_domains()
     if not domains:
-        return True
+        return False  # 未配置管理域名时，拒绝非本地访问（默认安全）
     return host in domains
 
 
@@ -59,7 +59,7 @@ def set_csrf_cookie(response: Response, token: str):
     response.set_cookie(
         key="csrf_token",
         value=token,
-        httponly=False,
+        httponly=True,
         samesite="lax",
         secure=False,
         max_age=86400,
@@ -68,8 +68,6 @@ def set_csrf_cookie(response: Response, token: str):
 
 
 def validate_csrf(request, form_token: str = None) -> bool:
-    if form_token is None:
-        return True
     cookie_token = request.cookies.get("csrf_token")
     if not cookie_token or not form_token:
         return False

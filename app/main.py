@@ -54,7 +54,8 @@ async def internal_error_handler(request: Request, exc):
 @app.exception_handler(Exception)
 async def generic_exception_handler(request: Request, exc):
     traceback.print_exc()
-    return JSONResponse({"error": str(exc)}, status_code=500)
+    # 不向客户端泄露内部异常详情
+    return JSONResponse({"error": "服务器内部错误"}, status_code=500)
 
 # Register routes
 app.include_router(front.router)

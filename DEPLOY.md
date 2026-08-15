@@ -84,6 +84,9 @@ ADMIN_DOMAIN=admin.91bus.top
 DATABASE_PATH=data/app.db
 UPLOADS_DIR=uploads
 IP2REGION_PATH=data/ip2region.xdb
+# 可信反向代理地址（逗号分隔），仅这些来源的 X-Real-IP 会被信任
+# 默认 127.0.0.1,::1,localhost；如使用 Cloudflare 需把其回源 IP 段加入
+TRUSTED_PROXIES=127.0.0.1,::1,localhost
 ```
 
 ### 3.3 放置 IP 归属地库（可选）
@@ -105,6 +108,13 @@ python init_db.py
 脚本会：建表 → 创建管理员 `admin` 并打印随机密码 → 写入默认配置 → 预置页面与友情链接。
 
 > **请立即保存输出的管理员密码**。若遗忘，用 `python reset_password.py` 重置。
+
+> **本次更新（数据库自动迁移）**：服务启动时 `init_db()` 会自动检测并补齐以下结构，缺失则自动 `ALTER TABLE ... ADD COLUMN` 或 `CREATE TABLE IF NOT EXISTS`：
+> - `images` 表补充字段：`title`、`region`、`ip`、`ua`、`ua_hash`、`province`、`city`、`content_md5`、`status`、`reject_reason`、`admin_edited`、`reviewed_at`、`views`、`like_count`、`is_duplicate`（历史库缺失的字段自动补空值）
+> - `admin_logs` 表补充字段：`ip`、`location`（历史日志无 IP/位置信息）
+> - `sessions` 表：新增，用于持久化管理员会话（支持多 worker 共享登录态）
+>
+> 无需手工执行任何 SQL；部署后重启服务即可自动完成迁移。
 
 ### 3.5 配置 systemd 服务
 
@@ -138,7 +148,7 @@ sudo systemctl start 91bus.service
 sudo systemctl status 91bus.service
 ```
 
-> `WORKERS` 默认保持 `1`。后台 Session 为进程内存存储，多 worker 会导致管理员登录态在进程间跳失；性能优化采用「单 worker + 线程池」方案，无需多进程。
+> `WORKERS` 默认保持 `1`（配合线程池已满足性能需求）。后台 Session 已持久化到数据库，如需多 worker 也能正常共享登录态；但图片处理为 CPU 密集操作，多进程/多线程并发仍需注意资源占用。
 
 ### 3.6 配置 Nginx 反向代理
 

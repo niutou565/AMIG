@@ -10,16 +10,16 @@
 {% if images %}
 <div class="top-list">
     {% for img in images %}
+    {% set card_text = img.title or '未命名' %}
     <a href="/image/{{ img.id }}" class="top-item">
         <span class="top-rank {% if loop.index + (page-1)*24 == 1 %}gold{% elif loop.index + (page-1)*24 == 2 %}silver{% elif loop.index + (page-1)*24 == 3 %}bronze{% endif %}">{{ loop.index + (page-1) * 24 }}</span>
         <div class="top-thumb">
-            <img src="/uploads/{{ img.thumb_filename }}" alt="{{ img.description }}" loading="lazy">
+            <img src="/uploads/{{ img.thumb_filename }}" alt="{{ card_text }}" loading="lazy">
         </div>
         <div class="top-info">
-            <p class="top-desc">{{ img.description[:60] }}{% if img.description|length > 60 %}...{% endif %}</p>
+            <p class="top-desc">{{ card_text[:60] }}{% if card_text|length > 60 %}...{% endif %}</p>
             <p class="top-meta">
-                <span>{{ img.author or '用户' }}</span>
-                {% if img.province %}<span>{{ img.province }}{{ img.city }}</span>{% endif %}
+                <span>{{ img|uploader_label }}</span>
             </p>
         </div>
         <div class="top-likes">&#10084; {{ img.window_likes }}</div>

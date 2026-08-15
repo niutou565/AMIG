@@ -23,11 +23,20 @@ UPLOADS_DIR = os.getenv("UPLOADS_DIR", str(BASE_DIR / "uploads"))
 IP2REGION_PATH = os.getenv("IP2REGION_PATH", str(BASE_DIR / "data" / "ip2region.xdb"))
 IP2REGION_V6_PATH = os.getenv("IP2REGION_V6_PATH", str(BASE_DIR / "data" / "ip2region_v6.xdb"))
 
+# 可信反向代理地址（仅当请求来自这些地址时，才信任 X-Real-IP 等代理头）
+# 默认仅信任本机回环，防止客户端伪造请求头绕过限流/封禁。
+TRUSTED_PROXIES = {
+    p.strip()
+    for p in os.getenv("TRUSTED_PROXIES", "127.0.0.1,::1,localhost").split(",")
+    if p.strip()
+}
+
 # 图片限制
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB
 MAX_IMAGE_PIXELS = 25_000_000       # 2500万像素
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 MAX_DESC_LENGTH = 200
+MAX_TITLE_LENGTH = 100
 MAX_AUTHOR_LENGTH = 30
 
 # 图片处理

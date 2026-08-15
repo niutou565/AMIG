@@ -51,6 +51,14 @@ def check_magic_bytes(data: bytes, ext: str) -> bool:
     return False
 
 
+def _atomic_write(path: str, data: bytes):
+    """先写临时文件再原子替换，避免进程中断留下半截文件。"""
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "wb") as f:
+        f.write(data)
+    os.replace(tmp_path, path)
+
+
 def process_image(file_data: bytes) -> tuple:
     """
     处理图片：剥离 EXIF、缩放到最长边 1920、转 WebP、生成缩略图
@@ -60,91 +68,93 @@ def process_image(file_data: bytes) -> tuple:
     """
     from io import BytesIO
 
+    full_dir = None
+    filename = None
+    thumb_filename = None
+
     try:
         img = Image.open(BytesIO(file_data))
-    except Exception as e:
-        return (None, f"无法打开图片文件：{str(e)}")
 
-    # 剥离 EXIF（转为 RGB 或 RGBA）
-    if img.mode not in ('RGB', 'RGBA'):
-        img = img.convert('RGBA')
+        # 剥离 EXIF（转为 RGB 或 RGBA）
+        if img.mode not in ('RGB', 'RGBA'):
+            img = img.convert('RGBA')
 
-    # 获取 EXIF 方向并矫正（若有）
-    try:
-        from PIL import ImageOps
-        img = ImageOps.exif_transpose(img)
+        # 获取 EXIF 方向并矫正（若有）
+        try:
+            from PIL import ImageOps
+            img = ImageOps.exif_transpose(img)
+        except Exception:
+            pass
+
+        original_size = len(file_data)
+        width, height = img.size
+
+        # 计算 MD5（处理前的内容）
+        content_md5 = hashlib.md5(file_data).hexdigest()
+
+        # 缩放（最长边 1920，仅当超出时）
+        if max(width, height) > MAX_IMAGE_DIMENSION:
+            ratio = MAX_IMAGE_DIMENSION / max(width, height)
+            new_width = int(width * ratio)
+            new_height = int(height * ratio)
+            img = img.resize((new_width, new_height), Image.LANCZOS)
+            width, height = new_width, new_height
+
+        # 转 WebP
+        output = BytesIO()
+        img.save(output, format='WEBP', quality=WEBP_QUALITY, method=WEBP_EFFORT)
+        compressed_data = output.getvalue()
+        compressed_size = len(compressed_data)
+
+        # 生成缩略图
+        thumb = img.copy()
+        thumb_max = max(thumb.size)
+        if thumb_max > THUMB_DIMENSION:
+            ratio = THUMB_DIMENSION / thumb_max
+            thumb = thumb.resize(
+                (int(thumb.size[0] * ratio), int(thumb.size[1] * ratio)),
+                Image.LANCZOS
+            )
+
+        thumb_output = BytesIO()
+        thumb.save(thumb_output, format='WEBP', quality=75, method=WEBP_EFFORT)
+        thumb_data = thumb_output.getvalue()
+
+        # 生成文件名和存储路径
+        now = datetime.now()
+        subdir = f"{now.year}/{now.month:02d}"
+        filename = f"{uuid.uuid4().hex}.webp"
+        thumb_filename = f"{uuid.uuid4().hex}_thumb.webp"
+
+        full_dir = os.path.join(UPLOADS_DIR, subdir)
+        os.makedirs(full_dir, exist_ok=True)
+
+        # 原子写入文件
+        _atomic_write(os.path.join(full_dir, filename), compressed_data)
+        _atomic_write(os.path.join(full_dir, thumb_filename), thumb_data)
+
+        return ({
+            "filename": f"{subdir}/{filename}",
+            "thumb_filename": f"{subdir}/{thumb_filename}",
+            "original_size": original_size,
+            "compressed_size": compressed_size,
+            "width": width,
+            "height": height,
+            "content_md5": content_md5,
+            "subdir": subdir,
+        }, "")
     except Exception:
-        pass
-
-    original_size = len(file_data)
-    width, height = img.size
-
-    # 计算 MD5（处理前的内容）
-    content_md5 = hashlib.md5(file_data).hexdigest()
-
-    # 缩放（最长边 1920，仅当超出时）
-    if max(width, height) > MAX_IMAGE_DIMENSION:
-        ratio = MAX_IMAGE_DIMENSION / max(width, height)
-        new_width = int(width * ratio)
-        new_height = int(height * ratio)
-        img = img.resize((new_width, new_height), Image.LANCZOS)
-        width, height = new_width, new_height
-
-    # 转 WebP
-    output = BytesIO()
-    save_kwargs = {"quality": WEBP_QUALITY, "method": WEBP_EFFORT}
-    if img.mode == 'RGBA':
-        img.save(output, format='WEBP', **save_kwargs)
-    else:
-        img.save(output, format='WEBP', **save_kwargs)
-    compressed_data = output.getvalue()
-    compressed_size = len(compressed_data)
-
-    # 生成缩略图
-    thumb = img.copy()
-    thumb_max = max(thumb.size)
-    if thumb_max > THUMB_DIMENSION:
-        ratio = THUMB_DIMENSION / thumb_max
-        thumb = thumb.resize(
-            (int(thumb.size[0] * ratio), int(thumb.size[1] * ratio)),
-            Image.LANCZOS
-        )
-
-    thumb_output = BytesIO()
-    if thumb.mode == 'RGBA':
-        thumb.save(thumb_output, format='WEBP', quality=75, method=WEBP_EFFORT)
-    else:
-        thumb.save(thumb_output, format='WEBP', quality=75, method=WEBP_EFFORT)
-    thumb_data = thumb_output.getvalue()
-
-    # 生成文件名和存储路径
-    now = datetime.now()
-    subdir = f"{now.year}/{now.month:02d}"
-    filename = f"{uuid.uuid4().hex}.webp"
-    thumb_filename = f"{uuid.uuid4().hex}_thumb.webp"
-
-    full_dir = os.path.join(UPLOADS_DIR, subdir)
-    os.makedirs(full_dir, exist_ok=True)
-
-    # 写入文件
-    filepath = os.path.join(full_dir, filename)
-    with open(filepath, 'wb') as f:
-        f.write(compressed_data)
-
-    thumb_path = os.path.join(full_dir, thumb_filename)
-    with open(thumb_path, 'wb') as f:
-        f.write(thumb_data)
-
-    return ({
-        "filename": f"{subdir}/{filename}",
-        "thumb_filename": f"{subdir}/{thumb_filename}",
-        "original_size": original_size,
-        "compressed_size": compressed_size,
-        "width": width,
-        "height": height,
-        "content_md5": content_md5,
-        "subdir": subdir,
-    }, "")
+        # 处理失败时清理可能残留的文件，避免留下孤儿文件
+        if full_dir:
+            for name in (filename, thumb_filename):
+                if name:
+                    try:
+                        p = os.path.join(full_dir, name)
+                        if os.path.exists(p):
+                            os.remove(p)
+                    except OSError:
+                        pass
+        return (None, "图片处理失败")
 
 
 def delete_image_files(filename, thumb_filename):

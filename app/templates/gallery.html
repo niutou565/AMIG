@@ -4,10 +4,21 @@
 {% block content %}
 <div class="page-header">
     <h1>图库</h1>
-    <form action="/gallery" method="get" class="search-form-inline">
-        <input type="text" name="q" placeholder="搜索简介或署名..." value="{{ query }}" class="search-input">
-        <button type="submit" class="search-btn">搜索</button>
-    </form>
+    <div class="gallery-toolbar">
+        <form action="/gallery" method="get" class="search-form-inline">
+            <input type="text" name="q" placeholder="搜索标题、简介或署名..." value="{{ query }}" class="search-input">
+            <button type="submit" class="search-btn">搜索</button>
+        </form>
+        {% if not query %}
+        <form action="/gallery" method="get" class="sort-form">
+            <select name="sort" onchange="this.form.submit()">
+                <option value="hot" {% if sort == 'hot' %}selected{% endif %}>按热度排序</option>
+                <option value="latest" {% if sort == 'latest' %}selected{% endif %}>按最新上传排序</option>
+                <option value="oldest" {% if sort == 'oldest' %}selected{% endif %}>按最旧上传排序</option>
+            </select>
+        </form>
+        {% endif %}
+    </div>
 </div>
 
 {% if query %}
@@ -17,15 +28,15 @@
 {% if images %}
 <div class="image-grid">
     {% for img in images %}
+    {% set card_text = img.title or '未命名' %}
     <a href="/image/{{ img.id }}" class="image-card">
         <div class="card-img-wrap">
-            <img src="/uploads/{{ img.thumb_filename }}" alt="{{ img.description }}" loading="lazy">
+            <img src="/uploads/{{ img.thumb_filename }}" alt="{{ card_text }}" loading="lazy">
         </div>
         <div class="card-info">
-            <p class="card-desc">{{ img.description[:50] }}{% if img.description|length > 50 %}...{% endif %}</p>
+            <p class="card-desc">{{ card_text[:50] }}{% if card_text|length > 50 %}...{% endif %}</p>
             <p class="card-meta">
-                <span>{{ img.author or '用户' }}</span>
-                <span>{% if img.province %}{{ img.province }}{{ img.city }}{% endif %}</span>
+                <span>{{ img|uploader_label }}</span>
                 <span class="like-count">&#10084; {{ img.like_count }}</span>
             </p>
         </div>

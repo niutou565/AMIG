@@ -214,11 +214,10 @@ img { max-width: 100%; height: auto; }
 
 /* ===== 图片详情 ===== */
 .image-detail { max-width: 900px; margin: 0 auto; }
-.detail-nav { display: flex; justify-content: space-between; margin-bottom: 1rem; }
-.nav-arrow { padding: 0.5rem 1rem; background: var(--bg-card); border-radius: var(--radius-sm); color: var(--text); }
 .detail-image-wrap { background: #000; border-radius: var(--radius); overflow: hidden; text-align: center; }
 .detail-image { max-height: 70vh; object-fit: contain; }
 .detail-info { padding: 1rem 0; }
+.detail-title { font-size: 1.5rem; margin-bottom: 0.5rem; }
 .detail-desc { font-size: 1.1rem; margin-bottom: 0.5rem; }
 .detail-meta { display: flex; flex-wrap: wrap; gap: 1rem; color: var(--text-secondary); font-size: 0.85rem; }
 
@@ -355,7 +354,7 @@ img { max-width: 100%; height: auto; }
 /* ===== 页面内容 ===== */
 .page-content { max-width: 800px; }
 .page-content h1 { margin-bottom: 1rem; }
-.markdown-body { line-height: 1.8; }
+.markdown-body { line-height: 1.8; white-space: pre-line; }
 
 /* ===== 搜索栏 ===== */
 .page-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 1rem; margin-bottom: 1.5rem; }
@@ -364,6 +363,21 @@ img { max-width: 100%; height: auto; }
 .search-form-inline .search-btn { padding: 0.5rem 1rem; }
 .search-result-info { color: var(--text-secondary); margin-bottom: 1rem; }
 .page-subtitle { color: var(--text-secondary); margin-bottom: 1rem; }
+
+/* ===== 图库工具栏 ===== */
+.gallery-toolbar { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+.sort-form select {
+    padding: 0.5rem 0.75rem;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    font-size: 0.9rem;
+}
+.sort-form select:focus { outline: none; border-color: var(--accent); }
+
+/* ===== 随机图片按钮 ===== */
+.random-btn { margin-left: 0.75rem; }
 
 /* ===== 响应式 ===== */
 @media (max-width: 768px) {
@@ -374,7 +388,6 @@ img { max-width: 100%; height: auto; }
     .nav-toggle { display: block; }
     .page-header { flex-direction: column; align-items: stretch; }
     .form-row { flex-direction: column; }
-    .detail-nav { flex-direction: column; align-items: center; gap: 0.5rem; }
 }
 @media (max-width: 480px) {
     .image-grid { grid-template-columns: repeat(2, 1fr); }

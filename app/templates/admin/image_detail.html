@@ -5,7 +5,7 @@
 <h1>图片详情 #{{ image.id }}</h1>
 
 {% if request.query_params.get('saved') %}
-<div class="alert alert-success">简介已更新</div>
+<div class="alert alert-success">标题/简介已更新</div>
 {% endif %}
 {% if edit_error %}
 <div class="alert alert-error">{{ edit_error }}</div>
@@ -20,8 +20,9 @@
             {% if image.status == 'pending' %}<span style="color:#f0ad4e">待审核</span>
             {% else %}<span style="color:#5cb85c">已通过</span>{% endif %}
         </p>
-        <p><strong>简介：</strong>{{ image.description }}</p>
-        <p><strong>署名：</strong>{{ image.author or '用户' }}</p>
+        <p><strong>标题：</strong>{{ image.title or '-' }}</p>
+        <p><strong>简介：</strong>{{ image.description or '-' }}</p>
+        <p><strong>署名：</strong>{{ image.author or '匿名用户' }}</p>
         <p><strong>上传者 IP：</strong>{{ image.ip }}</p>
         <p><strong>地区：</strong>{{ image.province }}{{ image.city }}</p>
         <p><strong>UA：</strong>{{ image.ua }}</p>
@@ -34,14 +35,18 @@
 </div>
 
 <div class="edit-form-section">
-    <h3>编辑简介</h3>
-    <form method="post" action="/admin/images/{{ image.id }}/edit" onsubmit="return confirm('确定保存对简介的修改？')">
+    <h3>编辑标题与简介</h3>
+    <form method="post" action="/admin/images/{{ image.id }}/edit" onsubmit="return confirm('确定保存对标题/简介的修改？')">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="form-group">
-            <label>简介（最多 200 字）</label>
-            <textarea name="description" rows="3" maxlength="200" required>{{ image.description }}</textarea>
+            <label>标题（必填，最多 100 字）</label>
+            <input type="text" name="title" value="{{ image.title or '' }}" maxlength="100" required>
         </div>
-        <button type="submit" class="btn btn-primary">保存简介</button>
+        <div class="form-group">
+            <label>简介（最多 200 字）</label>
+            <textarea name="description" rows="3" maxlength="200">{{ image.description or '' }}</textarea>
+        </div>
+        <button type="submit" class="btn btn-primary">保存</button>
     </form>
 </div>
 

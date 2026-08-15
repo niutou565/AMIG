@@ -4,7 +4,46 @@
 {% block content %}
 <h1>操作日志</h1>
 
-<table class="data-table">
+<div class="toolbar">
+    <form class="log-search" method="get" action="/admin/logs">
+        <input type="text" name="q" placeholder="关键词搜索（图片编号 image#123 / 详情 / 管理员）" value="{{ q }}" class="log-search-q">
+        <select name="action">
+            <option value="">全部操作类型</option>
+            <option value="login" {% if action == 'login' %}selected{% endif %}>登录</option>
+            <option value="approve" {% if action == 'approve' %}selected{% endif %}>通过</option>
+            <option value="reject" {% if action == 'reject' %}selected{% endif %}>拒绝删除</option>
+            <option value="delete" {% if action == 'delete' %}selected{% endif %}>删除</option>
+            <option value="edit" {% if action == 'edit' %}selected{% endif %}>编辑内容</option>
+            <option value="batch_approved" {% if action == 'batch_approved' %}selected{% endif %}>批量通过</option>
+            <option value="batch_rejected" {% if action == 'batch_rejected' %}selected{% endif %}>批量删除</option>
+            <option value="batch_reject" {% if action == 'batch_reject' %}selected{% endif %}>批量拒绝</option>
+            <option value="config" {% if action == 'config' %}selected{% endif %}>站点设置</option>
+            <option value="ban" {% if action == 'ban' %}selected{% endif %}>封禁</option>
+            <option value="unban" {% if action == 'unban' %}selected{% endif %}>解封</option>
+            <option value="reset_cooling" {% if action == 'reset_cooling' %}selected{% endif %}>重置冷却</option>
+            <option value="clear_likes" {% if action == 'clear_likes' %}selected{% endif %}>清除点赞</option>
+            <option value="link" {% if action == 'link' %}selected{% endif %}>友情链接</option>
+            <option value="page" {% if action == 'page' %}selected{% endif %}>页面管理</option>
+            <option value="change_password" {% if action == 'change_password' %}selected{% endif %}>修改密码</option>
+        </select>
+        <input type="text" name="ip" placeholder="IP 地址" value="{{ ip }}">
+        <input type="text" name="location" placeholder="地理位置" value="{{ location }}">
+        <input type="date" name="date_from" value="{{ date_from }}" title="开始日期">
+        <input type="date" name="date_to" value="{{ date_to }}" title="结束日期">
+        <button type="submit" class="btn btn-sm btn-primary">搜索</button>
+        <a href="/admin/logs" class="btn btn-sm">清除筛选</a>
+    </form>
+</div>
+
+<p class="search-result-info">
+    {% if q %}
+    搜索「<strong class="hl-text">{{ q }}</strong>」找到 {{ total }} 条日志
+    {% else %}
+    共 {{ total }} 条日志
+    {% endif %}
+</p>
+
+<table class="data-table log-table">
     <thead>
         <tr>
             <th>时间</th>
@@ -12,16 +51,24 @@
             <th>动作</th>
             <th>详情</th>
             <th>目标</th>
+            <th>IP 地址</th>
+            <th>地理位置</th>
         </tr>
     </thead>
     <tbody>
         {% for log in logs %}
+        <tr id="log-{{ log.id }}">
+            <td class="log-time">{{ log.created_at[:19] }}</td>
+            <td>{{ log.admin_name | highlight(q) }}</td>
+            <td><span class="action-tag action-{{ log.action }}">{{ log.action }}</span></td>
+            <td>{{ log.detail | highlight(q) }}</td>
+            <td class="log-target">{{ log.target | highlight(q) }}</td>
+            <td>{{ log.ip or '-' }}</td>
+            <td>{{ log.location or '-' }}</td>
+        </tr>
+        {% else %}
         <tr>
-            <td>{{ log.created_at[:19] }}</td>
-            <td>{{ log.admin_name }}</td>
-            <td>{{ log.action }}</td>
-            <td>{{ log.detail }}</td>
-            <td>{{ log.target }}</td>
+            <td colspan="7" class="empty-tip">暂无日志</td>
         </tr>
         {% endfor %}
     </tbody>

@@ -3,13 +3,14 @@ import re
 from fastapi import APIRouter, Request, Form, File, UploadFile, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
-from app.config import BASE_DIR, ADMIN_PER_PAGE, LIKES_PER_PAGE, MAX_DESC_LENGTH, UPLOADS_DIR
+from markupsafe import escape, Markup
+from app.config import BASE_DIR, ADMIN_PER_PAGE, LIKES_PER_PAGE, MAX_DESC_LENGTH, MAX_TITLE_LENGTH, UPLOADS_DIR
 from app.models import (
     get_images_by_status, count_images_by_status, get_image_by_id,
-    update_image_status, update_image_description, delete_image, get_all_links, get_link_by_id,
+    update_image_status, update_image_content, delete_image, get_all_links, get_link_by_id,
     upsert_link, delete_link, get_all_pages, get_page_by_id,
-    upsert_page, delete_page, get_admin_logs, count_admin_logs,
-    insert_admin_log, get_setting, set_setting, get_all_settings,
+    upsert_page, delete_page, search_admin_logs, count_admin_logs,
+    insert_admin_log, set_current_admin_request, get_setting, set_setting, get_all_settings,
     get_ban_list, add_ban, remove_ban, get_recent_upload_ips,
     get_all_cooling, reset_cooldown,
     search_images_admin, count_images_admin, batch_update_status,
@@ -29,6 +30,26 @@ import json
 
 router = APIRouter(prefix="/admin")
 templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
+
+
+def highlight(text, keyword):
+    """对文本中匹配的关键词进行高亮，返回安全 HTML。
+
+    先转义再高亮，避免日志内容中的 HTML 被当作标签渲染（防 XSS）。
+    """
+    if text is None:
+        return ""
+    escaped = escape(str(text))
+    if not keyword:
+        return escaped
+    kw = escape(str(keyword))
+    if not kw:
+        return escaped
+    pattern = re.compile(re.escape(kw), re.IGNORECASE)
+    return Markup(pattern.sub(lambda m: f'<mark class="hl">{m.group(0)}</mark>', escaped))
+
+
+templates.env.filters["highlight"] = highlight
 
 # Logo 允许的扩展名
 ALLOWED_LOGO_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".ico", ".svg"}
@@ -52,6 +73,8 @@ async def _save_logo(upload_file, prefix):
 def admin_required(request: Request):
     """检查管理员登录状态，返回 admin 对象或 None"""
     admin = get_current_admin(request)
+    if admin:
+        set_current_admin_request(request)
     return admin
 
 
@@ -103,6 +126,7 @@ async def login_action(
         samesite="lax",
         max_age=86400,
     )
+    set_current_admin_request(request)
     insert_admin_log(admin_obj["id"], admin_obj["username"], "login", "登录成功")
     return response
 
@@ -174,8 +198,10 @@ async def review_action(
     request: Request,
     image_id: int,
     action: str = Form(""),
+    title: str = Form(""),
     description: str = Form(""),
     author: str = Form(""),
+    edit_content: str = Form(""),
     csrf_token: str = Form(""),
 ):
     admin = admin_required(request)
@@ -189,12 +215,22 @@ async def review_action(
         raise HTTPException(status_code=404)
 
     if action == "approve":
-        update_image_status(
-            image_id, "approved",
-            description=description.strip() if description.strip() != image["description"] else None,
-            author=author.strip() if author.strip() != image["author"] else None,
-            admin_id=admin["id"], admin_name=admin["username"]
-        )
+        if edit_content == "1":
+            new_title = title.strip()
+            new_desc = description.strip()
+            new_author = author.strip()
+            update_image_status(
+                image_id, "approved",
+                title=new_title if new_title != image["title"] else None,
+                description=new_desc if new_desc != image["description"] else None,
+                author=new_author if new_author != image["author"] else None,
+                admin_id=admin["id"], admin_name=admin["username"]
+            )
+        else:
+            update_image_status(
+                image_id, "approved",
+                admin_id=admin["id"], admin_name=admin["username"]
+            )
         from app.models import increment_daily_stat, today_str
         increment_daily_stat(today_str(), "approved_count")
         invalidate_top_cache()
@@ -302,6 +338,7 @@ async def admin_image_detail(request: Request, image_id: int):
 async def admin_image_edit(
     request: Request,
     image_id: int,
+    title: str = Form(""),
     description: str = Form(""),
     csrf_token: str = Form(""),
 ):
@@ -315,10 +352,13 @@ async def admin_image_edit(
     if not image:
         raise HTTPException(status_code=404)
 
+    new_title = title.strip()
     new_desc = description.strip()
     error = None
-    if not new_desc:
-        error = "简介不能为空"
+    if not new_title:
+        error = "标题不能为空"
+    elif len(new_title) > MAX_TITLE_LENGTH:
+        error = f"标题长度不能超过 {MAX_TITLE_LENGTH} 字"
     elif len(new_desc) > MAX_DESC_LENGTH:
         error = f"简介长度不能超过 {MAX_DESC_LENGTH} 字"
 
@@ -330,7 +370,7 @@ async def admin_image_edit(
         ctx["edit_error"] = error
         return templates.TemplateResponse(request, "admin/image_detail.html", ctx)
 
-    update_image_description(image_id, new_desc, admin["id"], admin["username"])
+    update_image_content(image_id, new_title, new_desc, admin["id"], admin["username"])
     return RedirectResponse(url=f"/admin/images/{image_id}?saved=1", status_code=302)
 
 
@@ -609,16 +649,51 @@ async def admin_pages_delete(request: Request, page_id: int, csrf_token: str = F
 # ========== 操作日志 ==========
 
 @router.get("/logs", response_class=HTMLResponse)
-async def admin_logs(request: Request, page: int = 1):
+async def admin_logs(
+    request: Request,
+    page: int = 1,
+    action: str = "",
+    ip: str = "",
+    location: str = "",
+    q: str = "",
+    date_from: str = "",
+    date_to: str = "",
+):
     admin = admin_required(request)
     if not admin:
         return RedirectResponse(url="/admin/login", status_code=302)
     ctx = get_admin_context(request)
     offset = (page - 1) * 50
-    ctx["logs"] = get_admin_logs(50, offset)
-    ctx["total"] = count_admin_logs()
+
+    df = f"{date_from}T00:00:00" if date_from else ""
+    dt = f"{date_to}T23:59:59" if date_to else ""
+
+    query = q.strip() or None
+    ctx["logs"] = search_admin_logs(
+        action=action or None,
+        ip=ip.strip() or None,
+        location=location.strip() or None,
+        query=query,
+        date_from=df or None,
+        date_to=dt or None,
+        limit=50, offset=offset,
+    )
+    ctx["total"] = count_admin_logs(
+        action=action or None,
+        ip=ip.strip() or None,
+        location=location.strip() or None,
+        query=query,
+        date_from=df or None,
+        date_to=dt or None,
+    )
     ctx["page"] = page
     ctx["total_pages"] = max(1, (ctx["total"] + 50 - 1) // 50)
+    ctx["action"] = action
+    ctx["ip"] = ip
+    ctx["location"] = location
+    ctx["q"] = q
+    ctx["date_from"] = date_from
+    ctx["date_to"] = date_to
     return templates.TemplateResponse(request, "admin/logs.html", ctx)
 
 

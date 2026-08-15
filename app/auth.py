@@ -2,11 +2,12 @@
 import hashlib
 import secrets
 from datetime import datetime, timezone, timedelta
-from app.models import get_admin_by_username, update_admin_login_attempts, get_admin_by_id
+from app.models import get_admin_by_username, update_admin_login_attempts, get_admin_by_id, now_iso
+from app.database import get_db
 from app.config import LOGIN_MAX_ATTEMPTS, LOGIN_LOCK_MINUTES
 
-# 简单的内存 Session 存储 {session_id: {admin_id, username, expires_at}}
-_sessions = {}
+# 会话有效期（小时）
+SESSION_TTL_HOURS = 24
 
 
 def hash_password(password: str) -> str:
@@ -20,35 +21,43 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 
 def create_session(admin_id: int, username: str) -> str:
+    """创建会话并持久化到数据库（多 worker 进程间共享）。"""
     session_id = secrets.token_hex(32)
-    expires = datetime.now(timezone.utc) + timedelta(hours=24)
-    _sessions[session_id] = {
-        "admin_id": admin_id,
-        "username": username,
-        "expires_at": expires
-    }
-    # 清理过期 session
-    _cleanup_sessions()
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(hours=SESSION_TTL_HOURS)
+    db = get_db()
+    db.execute(
+        "INSERT INTO sessions (session_id, admin_id, username, created_at, expires_at) VALUES (?,?,?,?,?)",
+        (session_id, admin_id, username, now_iso(), expires.isoformat(timespec="seconds"))
+    )
+    db.commit()
     return session_id
 
 
 def get_session(session_id: str):
+    """从数据库读取会话，过期或不存在返回 None。"""
     _cleanup_sessions()
-    session = _sessions.get(session_id)
-    if session and session["expires_at"] > datetime.now(timezone.utc):
-        return session
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    row = get_db().execute(
+        "SELECT admin_id, username FROM sessions WHERE session_id=? AND expires_at > ?",
+        (session_id, now)
+    ).fetchone()
+    if row:
+        return {"admin_id": row["admin_id"], "username": row["username"]}
     return None
 
 
 def destroy_session(session_id: str):
-    _sessions.pop(session_id, None)
+    db = get_db()
+    db.execute("DELETE FROM sessions WHERE session_id=?", (session_id,))
+    db.commit()
 
 
 def _cleanup_sessions():
-    now = datetime.now(timezone.utc)
-    expired = [k for k, v in _sessions.items() if v["expires_at"] <= now]
-    for k in expired:
-        del _sessions[k]
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    db = get_db()
+    db.execute("DELETE FROM sessions WHERE expires_at <= ?", (now,))
+    db.commit()
 
 
 def login(username: str, password: str) -> tuple:

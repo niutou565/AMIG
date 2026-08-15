@@ -23,11 +23,11 @@
 {% if total_pages > 1 %}
 <div class="pagination">
     {% if page > 1 %}
-    <a href="?{% if query %}q={{ query }}&{% endif %}{% if status %}status={{ status }}&{% endif %}page={{ page - 1 }}" class="page-link">&laquo; 上一页</a>
+    <a href="?{% if query %}q={{ query }}&{% endif %}{% if q %}q={{ q | urlencode }}&{% endif %}{% if status %}status={{ status }}&{% endif %}{% if sort %}sort={{ sort }}&{% endif %}{% if action %}action={{ action }}&{% endif %}{% if ip %}ip={{ ip }}&{% endif %}{% if location %}location={{ location }}&{% endif %}{% if date_from %}date_from={{ date_from }}&{% endif %}{% if date_to %}date_to={{ date_to }}&{% endif %}page={{ page - 1 }}" class="page-link">&laquo; 上一页</a>
     {% endif %}
     <span class="page-link active">{{ page }} / {{ total_pages }}</span>
     {% if page < total_pages %}
-    <a href="?{% if query %}q={{ query }}&{% endif %}{% if status %}status={{ status }}&{% endif %}page={{ page + 1 }}" class="page-link">下一页 &raquo;</a>
+    <a href="?{% if query %}q={{ query }}&{% endif %}{% if q %}q={{ q | urlencode }}&{% endif %}{% if status %}status={{ status }}&{% endif %}{% if sort %}sort={{ sort }}&{% endif %}{% if action %}action={{ action }}&{% endif %}{% if ip %}ip={{ ip }}&{% endif %}{% if location %}location={{ location }}&{% endif %}{% if date_from %}date_from={{ date_from }}&{% endif %}{% if date_to %}date_to={{ date_to }}&{% endif %}page={{ page + 1 }}" class="page-link">下一页 &raquo;</a>
     {% endif %}
 </div>
 {% endif %}

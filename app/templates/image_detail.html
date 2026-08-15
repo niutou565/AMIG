@@ -1,24 +1,19 @@
 {% extends "base.html" %}
-{% block title %}{{ image.description[:30] }} - {{ site_name }}{% endblock %}
+{% block title %}{{ image.title or image.description[:30] or '未命名' }} - {{ site_name }}{% endblock %}
 
 {% block content %}
 <div class="image-detail">
-    <div class="detail-nav">
-        {% if prev_id %}<a href="/image/{{ prev_id }}" class="nav-arrow">&larr; 上一张</a>{% else %}<span></span>{% endif %}
-        {% if next_id %}<a href="/image/{{ next_id }}" class="nav-arrow">下一张 &rarr;</a>{% else %}<span></span>{% endif %}
-    </div>
-
     <div class="detail-image-wrap">
         <a href="/uploads/{{ image.filename }}" target="_blank">
-            <img src="/uploads/{{ image.filename }}" alt="{{ image.description }}" class="detail-image">
+            <img src="/uploads/{{ image.filename }}" alt="{{ image.title or image.description }}" class="detail-image">
         </a>
     </div>
 
     <div class="detail-info">
-        <p class="detail-desc">{{ image.description }}</p>
+        <h1 class="detail-title">{{ image.title or '未命名' }}</h1>
+        {% if image.description %}<p class="detail-desc">{{ image.description }}</p>{% endif %}
         <div class="detail-meta">
-            <span>上传者：{{ image.author or '用户' }}</span>
-            <span>位置：{% if image.province %}{{ image.province }}{{ image.city }}{% else %}未知{% endif %}</span>
+            <span>上传者：{{ image|uploader_label }}</span>
             <span>上传时间：{{ image.created_at[:10] }}</span>
             <span>尺寸：{{ image.width }}x{{ image.height }}</span>
             <span>大小：{{ (image.compressed_size / 1024)|round|int }}KB</span>
@@ -32,6 +27,7 @@
             <span class="like-text" id="likeText">{% if has_liked %}已赞{% else %}点赞{% endif %}</span>
             <span class="like-count-num" id="likeCount">{{ likes_count }}</span>
         </button>
+        <button class="btn btn-primary random-btn" id="randomBtn" data-image-id="{{ image.id }}">下一张随机图片</button>
     </div>
 
     {% if likes %}
@@ -52,28 +48,49 @@
 <script>
 (function() {
     const btn = document.getElementById('likeBtn');
-    if (!btn) return;
-    btn.addEventListener('click', async function() {
-        if (btn.classList.contains('liked')) {
-            alert('您已经赞过这张图片了');
-            return;
-        }
-        btn.disabled = true;
-        try {
-            const resp = await fetch('/api/like/' + btn.dataset.imageId, { method: 'POST' });
-            const data = await resp.json();
-            if (data.success) {
-                btn.classList.add('liked');
-                document.getElementById('likeText').textContent = '已赞';
-                document.getElementById('likeCount').textContent = data.like_count;
-            } else {
-                alert(data.error || '点赞失败');
+    if (btn) {
+        btn.addEventListener('click', async function() {
+            if (btn.classList.contains('liked')) {
+                alert('您已经赞过这张图片了');
+                return;
             }
-        } catch(e) {
-            alert('网络错误，请重试');
-        }
-        btn.disabled = false;
-    });
+            btn.disabled = true;
+            try {
+                const resp = await fetch('/api/like/' + btn.dataset.imageId, { method: 'POST' });
+                const data = await resp.json();
+                if (data.success) {
+                    btn.classList.add('liked');
+                    document.getElementById('likeText').textContent = '已赞';
+                    document.getElementById('likeCount').textContent = data.like_count;
+                } else {
+                    alert(data.error || '点赞失败');
+                }
+            } catch(e) {
+                alert('网络错误，请重试');
+            }
+            btn.disabled = false;
+        });
+    }
+
+    const randomBtn = document.getElementById('randomBtn');
+    if (randomBtn) {
+        randomBtn.addEventListener('click', async function() {
+            randomBtn.disabled = true;
+            try {
+                const resp = await fetch('/api/random-image?exclude=' + randomBtn.dataset.imageId);
+                const data = await resp.json();
+                if (data.id) {
+                    window.location.href = '/image/' + data.id;
+                } else {
+                    alert(data.error || '暂无更多图片');
+                    randomBtn.disabled = false;
+                }
+            } catch(e) {
+                alert('网络错误，请重试');
+                randomBtn.disabled = false;
+            }
+        });
+    }
 })();
 </script>
 {% endblock %}

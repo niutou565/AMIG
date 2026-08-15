@@ -1,7 +1,7 @@
 """IP 归属地查询，基于 ip2region xdb（支持 IPv4 + IPv6）"""
 import os
 import ipaddress
-from app.config import IP2REGION_PATH, IP2REGION_V6_PATH
+from app.config import IP2REGION_PATH, IP2REGION_V6_PATH, TRUSTED_PROXIES
 
 _v4_searcher = None
 _v6_searcher = None
@@ -50,75 +50,106 @@ def _is_ipv6(ip: str) -> bool:
         return False
 
 
-def get_ip_location(ip: str):
-    """返回 (province, city)"""
+def _lookup(ip: str):
+    """查询 IP，返回 (country, province, city)。无法确定或内网地址时 country 为空串。"""
     searcher = _v6_searcher if _is_ipv6(ip) else _v4_searcher
     if searcher is None:
-        return ("", "")
+        return ("", "", "")
     try:
         result = searcher.search(ip)
         if not result:
-            return ("", "")
+            return ("", "", "")
         parts = result.split("|")
-        if len(parts) >= 4:
-            # 新版 v4.xdb 格式: 国家 | 省份 | 城市 | ISP | 国家码
-            # 兼容旧 v2.xdb 格式: 国家 | 区域 | 省份 | 城市 | ISP
-            country = parts[0].strip()
-            if len(parts) >= 5 and (parts[4] in ("0", "") or len(parts[4]) == 2):
-                # v4 格式: 5段,末位是 CN/US/AU 等双字母 ISO code 或 0
-                province_raw = parts[1].strip()
-                city_raw = parts[2].strip()
-            else:
-                # v2 格式: 5段格式 国家|区域|省份|城市|ISP
-                province_raw = parts[2].strip() if len(parts) > 2 else ""
-                city_raw = parts[3].strip() if len(parts) > 3 else ""
+        if len(parts) < 4:
+            return ("", "", "")
 
-            # 跳过"0"占位符
-            province = "" if province_raw in ("0", "") else province_raw
-            city = "" if city_raw in ("0", "") else city_raw
+        # 新版 v4.xdb 格式: 国家 | 省份 | 城市 | ISP | 国家码
+        # 兼容旧 v2.xdb 格式: 国家 | 区域 | 省份 | 城市 | ISP
+        country = parts[0].strip()
+        if len(parts) >= 5 and (parts[4] in ("0", "") or len(parts[4]) == 2):
+            province_raw = parts[1].strip()
+            city_raw = parts[2].strip()
+        else:
+            province_raw = parts[2].strip() if len(parts) > 2 else ""
+            city_raw = parts[3].strip() if len(parts) > 3 else ""
 
-            # 内网 / 保留地址 / IANA 特殊用途 → 不展示位置
-            if country in ("Reserved", "内网IP", "loopback", "IANA") or country.startswith("0"):
-                return ("", "")
-            if province in ("Reserved", "内网IP") or city in ("Reserved", "内网IP"):
-                return ("", "")
+        # 跳过"0"占位符
+        province = "" if province_raw in ("0", "") else province_raw
+        city = "" if city_raw in ("0", "") else city_raw
 
-            # 只对中国地址展示 省/市；海外 IP 一般精确不到中国意义上的「省市」
-            # 而且省名字段是英文州名（Queensland/California），混在中文里不美观，
-            # 所以只在 country 是中国时返回真实省份 + 城市。
-            if country not in ("中国", "China", "CN"):
-                return ("", "")
+        # 内网 / 保留地址 / IANA 特殊用途 → 视为未知地区
+        if country in ("Reserved", "内网IP", "loopback", "IANA") or country.startswith("0"):
+            return ("", "", "")
+        if province in ("Reserved", "内网IP") or city in ("Reserved", "内网IP"):
+            return ("", "", "")
 
-            # 直辖市去重：北京市北京市 / 上海市上海市 / 天津市天津市 / 重庆市重庆市
-            direct_cities = ("北京市", "上海市", "天津市", "重庆市")
-            if province in direct_cities and city == province:
-                city = ""
-            # 兼容：province 是省份全称但 city 写成直辖市名的情况
-            if province == city and province.endswith("市"):
-                city = ""
-
-            return (province, city)
-        return ("", "")
+        return (country, province, city)
     except Exception:
+        return ("", "", "")
+
+
+def get_ip_location(ip: str):
+    """返回 (province, city)，仅中国大陆地址返回省/市，其余返回空串。"""
+    country, province, city = _lookup(ip)
+    if country not in ("中国", "China", "CN"):
         return ("", "")
+    # 直辖市去重：北京市北京市 / 上海市上海市 / 天津市天津市 / 重庆市重庆市
+    direct_cities = ("北京市", "上海市", "天津市", "重庆市")
+    if province in direct_cities and city == province:
+        city = ""
+    if province == city and province.endswith("市"):
+        city = ""
+    return (province, city)
+
+
+def get_ip_region(ip: str):
+    """返回地区分类：cn（中国大陆）/ overseas（海外）/ ""（未知）。"""
+    country = _lookup(ip)[0]
+    if country in ("中国", "China", "CN"):
+        return "cn"
+    if country:
+        return "overseas"
+    return ""
+
+
+def get_ip_geo_label(ip: str):
+    """返回管理员日志用的地理位置文案。
+
+    国内：省/市（城市级，如 "广西柳州" / "北京市"）
+    海外：海外IP + 国家（如 "海外IP 美国"）
+    未知：未知地区
+    """
+    country, province, city = _lookup(ip)
+    if country in ("中国", "China", "CN"):
+        direct_cities = ("北京市", "上海市", "天津市", "重庆市")
+        if province in direct_cities and city == province:
+            city = ""
+        if province == city and province.endswith("市"):
+            city = ""
+        if province or city:
+            return f"{province}{city}"
+        return "中国大陆"
+    if country:
+        return f"海外IP {country}"
+    return "未知地区"
 
 
 def get_client_ip(request):
-    """获取客户端真实 IP
+    """获取客户端真实 IP。
 
-    优先级：CF-Connecting-IP（Cloudflare）> X-Real-IP（Nginx 设置的 $remote_addr）
-    > X-Forwarded-For 末位（由最近可信代理追加）> 直连地址。
-    不信任 X-Forwarded-For 的首个值，避免客户端伪造 IP 绕过限流/封禁。
+    安全策略：仅在请求直接来自可信反向代理（TRUSTED_PROXIES）时，才信任
+    X-Real-IP（由 Nginx 用 $remote_addr 覆盖注入）。绝不无条件信任
+    CF-Connecting-IP / X-Forwarded-For 等客户端可伪造的请求头，避免绕过限流/封禁。
     """
-    cf_ip = request.headers.get("CF-Connecting-IP")
-    if cf_ip:
-        return cf_ip.strip()
+    client_host = request.client.host if request.client else "127.0.0.1"
+
+    # 直连或来自非可信来源：直接返回对端地址
+    if client_host not in TRUSTED_PROXIES:
+        return client_host
+
+    # 来自可信代理：信任其注入的 X-Real-IP
     real_ip = request.headers.get("X-Real-IP")
-    if real_ip:
+    if real_ip and real_ip.strip():
         return real_ip.strip()
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[-1].strip()
-    if request.client:
-        return request.client.host
-    return "127.0.0.1"
+
+    return client_host

@@ -1,8 +1,21 @@
 import hashlib
 import time
 import uuid
+import contextvars
 from datetime import datetime, timezone, timedelta
 from app.database import get_db
+
+# 当前请求的管理员 IP 与地理位置（由 admin 路由设置，供日志记录使用）
+_current_admin_ip = contextvars.ContextVar("current_admin_ip", default="")
+_current_admin_location = contextvars.ContextVar("current_admin_location", default="")
+
+
+def set_current_admin_request(request):
+    """在后台请求上下文中记录当前管理员 IP 与地理位置。"""
+    from app.ip_geo import get_client_ip, get_ip_geo_label
+    ip = get_client_ip(request)
+    _current_admin_ip.set(ip)
+    _current_admin_location.set(get_ip_geo_label(ip))
 
 
 def now_iso():
@@ -37,16 +50,16 @@ def generate_filename() -> str:
 
 def insert_image(filename, thumb_filename, original_size, compressed_size,
                  width, height, description, author, content_md5,
-                 ip, ua, ua_hash_val, province, city, is_dup=0):
+                 ip, ua, ua_hash_val, province, city, is_dup=0, title="", region=""):
     db = get_db()
     db.execute(
         """INSERT INTO images (filename, thumb_filename, original_size, compressed_size,
-           width, height, description, author, content_md5, ip, ua, ua_hash,
-           province, city, status, created_at, is_duplicate)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'pending', ?, ?)""",
+           width, height, description, title, author, content_md5, ip, ua, ua_hash,
+           province, city, region, status, created_at, is_duplicate)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'pending', ?, ?)""",
         (filename, thumb_filename, original_size, compressed_size,
-         width, height, description, author, content_md5, ip, ua, ua_hash_val,
-         province, city, now_iso(), is_dup)
+         width, height, description, title, author, content_md5, ip, ua, ua_hash_val,
+         province, city, region, now_iso(), is_dup)
     )
     db.commit()
     return db.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -62,7 +75,18 @@ def get_approved_image_by_id(image_id):
     ).fetchone()
 
 
+# order_by 白名单：防止 SQL 注入（拒绝任意字符串拼接）
+_ALLOWED_ORDER_BY = {
+    "created_at DESC",
+    "created_at ASC",
+    "like_count DESC",
+    "views DESC",
+}
+
+
 def get_images_by_status(status, limit=24, offset=0, order_by="created_at DESC"):
+    if order_by not in _ALLOWED_ORDER_BY:
+        order_by = "created_at DESC"
     return get_db().execute(
         f"SELECT * FROM images WHERE status=? ORDER BY {order_by} LIMIT ? OFFSET ?",
         (status, limit, offset)
@@ -73,6 +97,10 @@ def count_images_by_status(status):
     return get_db().execute(
         "SELECT COUNT(*) FROM images WHERE status=?", (status,)
     ).fetchone()[0]
+
+
+def count_images_total():
+    return get_db().execute("SELECT COUNT(*) FROM images").fetchone()[0]
 
 
 def get_random_approved_images(limit=12):
@@ -102,14 +130,33 @@ def get_latest_approved_images(limit=12):
     ).fetchall()
 
 
+def get_random_image_prefer_low_heat(exclude_id=None):
+    """随机返回一张已通过图片，权重向热度（点赞数）较低的图片倾斜"""
+    db = get_db()
+    if exclude_id is not None:
+        rows = db.execute(
+            "SELECT id, like_count FROM images WHERE status='approved' AND id != ?",
+            (exclude_id,)
+        ).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT id, like_count FROM images WHERE status='approved'"
+        ).fetchall()
+    if not rows:
+        return None
+    import random
+    weights = [1.0 / (r["like_count"] + 1) for r in rows]
+    return random.choices(rows, weights=weights, k=1)[0]
+
+
 def search_approved_images(query, limit=24, offset=0):
     db = get_db()
     q = f"%{query}%"
     return db.execute(
         """SELECT * FROM images WHERE status='approved'
-           AND (description LIKE ? OR author LIKE ?)
+           AND (title LIKE ? OR description LIKE ? OR author LIKE ?)
            ORDER BY reviewed_at DESC LIMIT ? OFFSET ?""",
-        (q, q, limit, offset)
+        (q, q, q, limit, offset)
     ).fetchall()
 
 
@@ -118,17 +165,17 @@ def count_search_approved_images(query):
     q = f"%{query}%"
     return db.execute(
         """SELECT COUNT(*) FROM images WHERE status='approved'
-           AND (description LIKE ? OR author LIKE ?)""",
-        (q, q)
+           AND (title LIKE ? OR description LIKE ? OR author LIKE ?)""",
+        (q, q, q)
     ).fetchone()[0]
 
 
 def update_image_status(image_id, status, reject_reason=None, admin_id=None,
-                        admin_name=None, description=None, author=None):
+                        admin_name=None, description=None, author=None, title=None):
     db = get_db()
     now = now_iso()
     admin_edited = 0
-    if description is not None or author is not None:
+    if description is not None or author is not None or title is not None:
         admin_edited = 1
     fields = ["status=?", "reviewed_at=?", "admin_edited=?"]
     params = [status, now, admin_edited]
@@ -138,6 +185,9 @@ def update_image_status(image_id, status, reject_reason=None, admin_id=None,
     if description is not None:
         fields.append("description=?")
         params.append(description)
+    if title is not None:
+        fields.append("title=?")
+        params.append(title)
     if author is not None:
         fields.append("author=?")
         params.append(author)
@@ -155,16 +205,16 @@ def update_image_status(image_id, status, reject_reason=None, admin_id=None,
         insert_admin_log(admin_id, admin_name, action, detail, f"image#{image_id}")
 
 
-def update_image_description(image_id, description, admin_id=None, admin_name=None):
-    """更新图片简介并标记为管理员编辑过"""
+def update_image_content(image_id, title, description, admin_id=None, admin_name=None):
+    """更新图片标题和简介并标记为管理员编辑过"""
     db = get_db()
     db.execute(
-        "UPDATE images SET description=?, admin_edited=1 WHERE id=?",
-        (description, image_id)
+        "UPDATE images SET title=?, description=?, admin_edited=1 WHERE id=?",
+        (title, description, image_id)
     )
     db.commit()
     if admin_id:
-        insert_admin_log(admin_id, admin_name, "edit", "编辑图片简介", f"image#{image_id}")
+        insert_admin_log(admin_id, admin_name, "edit", "编辑图片标题/简介", f"image#{image_id}")
 
 
 def delete_image(image_id):
@@ -505,7 +555,13 @@ def ensure_daily_stats(date_str=None):
     db.commit()
 
 
+# daily_stats 可递增的字段白名单：防止 SQL 注入
+_ALLOWED_STAT_FIELDS = {"upload_count", "approved_count", "rejected_count", "like_count", "view_count"}
+
+
 def increment_daily_stat(date_str, field):
+    if field not in _ALLOWED_STAT_FIELDS:
+        raise ValueError(f"非法统计字段: {field}")
     ensure_daily_stats(date_str)
     db = get_db()
     db.execute(f"UPDATE daily_stats SET {field} = {field} + 1 WHERE date=?", (date_str,))
@@ -572,24 +628,81 @@ def get_ban_count():
 
 # ========== admin_logs ==========
 
-def insert_admin_log(admin_id, admin_name, action, detail="", target=""):
+def insert_admin_log(admin_id, admin_name, action, detail="", target="", ip=None, location=None):
     db = get_db()
+    if ip is None:
+        ip = _current_admin_ip.get()
+    if location is None:
+        location = _current_admin_location.get()
     db.execute(
-        "INSERT INTO admin_logs (admin_id, admin_name, action, detail, target, created_at) VALUES (?,?,?,?,?,?)",
-        (admin_id, admin_name, action, detail, target, now_iso())
+        "INSERT INTO admin_logs (admin_id, admin_name, action, detail, target, ip, location, created_at) VALUES (?,?,?,?,?,?,?,?)",
+        (admin_id, admin_name, action, detail, target, ip, location, now_iso())
     )
     db.commit()
 
 
-def get_admin_logs(limit=50, offset=0):
-    return get_db().execute(
-        "SELECT * FROM admin_logs ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        (limit, offset)
+def search_admin_logs(action=None, ip=None, location=None, query=None,
+                      date_from=None, date_to=None, limit=50, offset=0):
+    """搜索操作日志。
+
+    query 为通用关键词，对 detail / target / admin_name 做部分匹配，
+    便于通过图片编号（如 image#123）、操作详情等灵活检索。
+    """
+    db = get_db()
+    conditions = []
+    params = []
+    if action:
+        conditions.append("action = ?")
+        params.append(action)
+    if ip:
+        conditions.append("ip LIKE ?")
+        params.append(f"%{ip}%")
+    if location:
+        conditions.append("location LIKE ?")
+        params.append(f"%{location}%")
+    if query:
+        conditions.append("(detail LIKE ? OR target LIKE ? OR admin_name LIKE ?)")
+        q = f"%{query}%"
+        params.extend([q, q, q])
+    if date_from:
+        conditions.append("created_at >= ?")
+        params.append(date_from)
+    if date_to:
+        conditions.append("created_at <= ?")
+        params.append(date_to)
+    where = " AND ".join(conditions) if conditions else "1=1"
+    return db.execute(
+        f"SELECT * FROM admin_logs WHERE {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        params + [limit, offset]
     ).fetchall()
 
 
-def count_admin_logs():
-    return get_db().execute("SELECT COUNT(*) FROM admin_logs").fetchone()[0]
+def count_admin_logs(action=None, ip=None, location=None, query=None,
+                     date_from=None, date_to=None):
+    db = get_db()
+    conditions = []
+    params = []
+    if action:
+        conditions.append("action = ?")
+        params.append(action)
+    if ip:
+        conditions.append("ip LIKE ?")
+        params.append(f"%{ip}%")
+    if location:
+        conditions.append("location LIKE ?")
+        params.append(f"%{location}%")
+    if query:
+        conditions.append("(detail LIKE ? OR target LIKE ? OR admin_name LIKE ?)")
+        q = f"%{query}%"
+        params.extend([q, q, q])
+    if date_from:
+        conditions.append("created_at >= ?")
+        params.append(date_from)
+    if date_to:
+        conditions.append("created_at <= ?")
+        params.append(date_to)
+    where = " AND ".join(conditions) if conditions else "1=1"
+    return db.execute(f"SELECT COUNT(*) FROM admin_logs WHERE {where}", params).fetchone()[0]
 
 
 # ========== view_sessions ==========
@@ -718,6 +831,8 @@ def get_last_upload_time(ip):
 # ========== 后台搜索 ==========
 
 def search_images_admin(status=None, query=None, limit=24, offset=0, order_by="created_at DESC"):
+    if order_by not in _ALLOWED_ORDER_BY:
+        order_by = "created_at DESC"
     db = get_db()
     conditions = []
     params = []
@@ -725,9 +840,9 @@ def search_images_admin(status=None, query=None, limit=24, offset=0, order_by="c
         conditions.append("status = ?")
         params.append(status)
     if query:
-        conditions.append("(description LIKE ? OR author LIKE ? OR ip LIKE ? OR province LIKE ? OR city LIKE ?)")
+        conditions.append("(title LIKE ? OR description LIKE ? OR author LIKE ? OR ip LIKE ? OR province LIKE ? OR city LIKE ?)")
         q = f"%{query}%"
-        params.extend([q, q, q, q, q])
+        params.extend([q, q, q, q, q, q])
     where = " AND ".join(conditions) if conditions else "1=1"
     return db.execute(
         f"SELECT * FROM images WHERE {where} ORDER BY {order_by} LIMIT ? OFFSET ?",
@@ -743,9 +858,9 @@ def count_images_admin(status=None, query=None):
         conditions.append("status = ?")
         params.append(status)
     if query:
-        conditions.append("(description LIKE ? OR author LIKE ? OR ip LIKE ? OR province LIKE ? OR city LIKE ?)")
+        conditions.append("(title LIKE ? OR description LIKE ? OR author LIKE ? OR ip LIKE ? OR province LIKE ? OR city LIKE ?)")
         q = f"%{query}%"
-        params.extend([q, q, q, q, q])
+        params.extend([q, q, q, q, q, q])
     where = " AND ".join(conditions) if conditions else "1=1"
     return db.execute(f"SELECT COUNT(*) FROM images WHERE {where}", params).fetchone()[0]
 

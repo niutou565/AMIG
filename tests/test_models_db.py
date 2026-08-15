@@ -93,5 +93,78 @@ class TestUploadLimit(DbTestCase):
         self.assertIn("频繁", msg)
 
 
+class TestTitleField(DbTestCase):
+    def _insert_approved(self, title, description, author, ip):
+        img_id = models.insert_image(
+            "f.webp", "t.webp", 1000, 800, 100, 80,
+            description, author, f"md5_{ip}", ip, "ua", "uahash",
+            "江苏", "南京", title=title,
+        )
+        db.get_db().execute(
+            "UPDATE images SET status='approved' WHERE id=?", (img_id,)
+        )
+        db.get_db().commit()
+        return img_id
+
+    def test_title_search(self):
+        id1 = self._insert_approved("风景照片", "美丽风景", "张三", "1.1.1.1")
+        id2 = self._insert_approved("美食记录", "好吃", "李四", "2.2.2.2")
+
+        rows = models.search_approved_images("风景", 10, 0)
+        self.assertEqual([r["id"] for r in rows], [id1])
+        self.assertEqual(models.count_search_approved_images("风景"), 1)
+
+        # 历史图片标题为空时，仍可通过简介搜索到
+        db.get_db().execute("UPDATE images SET title='' WHERE id=?", (id2,))
+        db.get_db().commit()
+        self.assertEqual(models.count_search_approved_images("好吃"), 1)
+
+
+class TestRandomImage(DbTestCase):
+    def _insert_approved(self, ip):
+        img_id = models.insert_image(
+            "f.webp", "t.webp", 1000, 800, 100, 80,
+            "desc", "author", f"md5_{ip}", ip, "ua", "uahash", "江苏", "南京",
+        )
+        db.get_db().execute(
+            "UPDATE images SET status='approved' WHERE id=?", (img_id,)
+        )
+        db.get_db().commit()
+        return img_id
+
+    def test_exclude_returns_other(self):
+        id1 = self._insert_approved("3.3.3.3")
+        id2 = self._insert_approved("4.4.4.4")
+        row = models.get_random_image_prefer_low_heat(exclude_id=id1)
+        self.assertEqual(row["id"], id2)
+        row = models.get_random_image_prefer_low_heat(exclude_id=id2)
+        self.assertEqual(row["id"], id1)
+
+    def test_returns_none_when_no_approved(self):
+        db.get_db().execute("DELETE FROM images")
+        db.get_db().commit()
+        self.assertIsNone(models.get_random_image_prefer_low_heat())
+
+
+class TestAdminLogs(DbTestCase):
+    def test_search_filters(self):
+        models.insert_admin_log(1, "admin", "login", "登录成功", "", ip="1.1.1.1", location="北京市")
+        models.insert_admin_log(1, "admin", "approve", "通过", "image#1", ip="2.2.2.2", location="海外IP 美国")
+        models.insert_admin_log(1, "admin", "delete", "删除", "image#2", ip="1.1.1.1", location="北京市")
+
+        rows = models.search_admin_logs(action="approve")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["ip"], "2.2.2.2")
+
+        rows = models.search_admin_logs(ip="1.1.1.1")
+        self.assertEqual(len(rows), 2)
+
+        rows = models.search_admin_logs(location="海外")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["location"], "海外IP 美国")
+
+        self.assertEqual(models.count_admin_logs(action="delete"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

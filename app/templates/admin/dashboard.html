@@ -4,20 +4,17 @@
 {% block content %}
 <h1>仪表盘</h1>
 
+<h3 class="stats-section-title">今日概况</h3>
 <div class="stats-grid">
     <div class="stat-card">
         <div class="stat-value">{{ data.today.upload_count }}</div>
         <div class="stat-label">今日上传</div>
     </div>
-    <div class="stat-card">
-        <div class="stat-value">{{ data.pending }}</div>
-        <div class="stat-label">待审核</div>
-    </div>
-    <div class="stat-card">
+    <div class="stat-card tone-success">
         <div class="stat-value">{{ data.today.approved_count }}</div>
         <div class="stat-label">今日通过</div>
     </div>
-    <div class="stat-card">
+    <div class="stat-card tone-danger">
         <div class="stat-value">{{ data.today.rejected_count }}</div>
         <div class="stat-label">今日拒绝</div>
     </div>
@@ -31,13 +28,33 @@
     </div>
     <div class="stat-card">
         <div class="stat-value">{{ data.pass_rate }}%</div>
-        <div class="stat-label">通过率</div>
+        <div class="stat-label">今日通过率</div>
+    </div>
+</div>
+
+<h3 class="stats-section-title">累计概况</h3>
+<div class="stats-grid">
+    <a href="/admin/review" class="stat-card stat-link tone-warning">
+        <div class="stat-value">{{ data.pending }}</div>
+        <div class="stat-label">待审核</div>
+    </a>
+    <div class="stat-card">
+        <div class="stat-value">{{ data.total_images }}</div>
+        <div class="stat-label">累计图片</div>
+    </div>
+    <div class="stat-card tone-success">
+        <div class="stat-value">{{ data.approved }}</div>
+        <div class="stat-label">已通过</div>
+    </div>
+    <div class="stat-card tone-danger">
+        <div class="stat-value">{{ data.rejected }}</div>
+        <div class="stat-label">已拒绝</div>
     </div>
     <div class="stat-card">
         <div class="stat-value">{{ data.active_ips }}</div>
         <div class="stat-label">近7天活跃IP</div>
     </div>
-    <div class="stat-card">
+    <div class="stat-card tone-danger">
         <div class="stat-value">{{ data.ban_count }}</div>
         <div class="stat-label">当前封禁数</div>
     </div>
@@ -85,24 +102,24 @@
     </div>
     <div class="hot-list" id="hotWindow">
         {% for img in data.hot_window %}
-        <div class="hot-item">
+        <a class="hot-item" href="/admin/images/{{ img.id }}">
             <span class="hot-rank">{{ loop.index }}</span>
             <img src="/uploads/{{ img.thumb_filename }}" class="hot-thumb" loading="lazy">
-            <span class="hot-desc">{{ img.description[:30] }}</span>
+            <span class="hot-desc">{{ (img.title or img.description)[:30] }}</span>
             <span class="hot-likes">&#10084; {{ img.window_likes }}</span>
-        </div>
+        </a>
         {% else %}
         <p class="empty-tip">窗口内暂无热门图片</p>
         {% endfor %}
     </div>
     <div class="hot-list" id="hotAll" style="display:none">
         {% for img in data.hot_all %}
-        <div class="hot-item">
+        <a class="hot-item" href="/admin/images/{{ img.id }}">
             <span class="hot-rank">{{ loop.index }}</span>
             <img src="/uploads/{{ img.thumb_filename }}" class="hot-thumb" loading="lazy">
-            <span class="hot-desc">{{ img.description[:30] }}</span>
+            <span class="hot-desc">{{ (img.title or img.description)[:30] }}</span>
             <span class="hot-likes">&#10084; {{ img.like_count }}</span>
-        </div>
+        </a>
         {% else %}
         <p class="empty-tip">暂无热门图片</p>
         {% endfor %}
@@ -129,11 +146,15 @@
         var bars = '';
         trendData.forEach(function (d, i) {
             var val = values[i];
-            var bh = Math.round(val / maxVal * (h - 40));
+            var bh = Math.round(val / maxVal * (h - 55));
             var x = pad + i * slot + (slot - bw) / 2;
             var y = h - bh - 25;
             bars += '<rect x="' + x + '" y="' + y + '" width="' + bw + '" height="' + bh + '" rx="4" fill="var(--accent)" opacity="0.85">'
                  +  '<title>' + d.date + ': ' + val + '</title></rect>';
+            if (val > 0) {
+                bars += '<text x="' + (x + bw / 2) + '" y="' + (y - 5) + '" fill="#c9c9d1" font-size="10" text-anchor="middle">'
+                     +  val + '</text>';
+            }
             bars += '<text x="' + (x + bw / 2) + '" y="' + (h - 8) + '" fill="#9a9aa5" font-size="10" text-anchor="middle">'
                  +  d.date.slice(5) + '</text>';
         });
