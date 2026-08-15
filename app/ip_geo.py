@@ -11,7 +11,7 @@ def init_ip2region():
         print(f"[WARN] ip2region.xdb not found at {IP2REGION_PATH}, IP geo disabled")
         return
     try:
-        import xdbSearcher
+        from ip2region import xdbSearcher
         _searcher = xdbSearcher.loadVectorIndexFromFile(IP2REGION_PATH)
         print(f"[INFO] ip2region loaded from {IP2REGION_PATH}")
     except ImportError:
