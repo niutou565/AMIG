@@ -21,6 +21,7 @@ ADMIN_DOMAIN = os.getenv("ADMIN_DOMAIN", "")
 DATABASE_PATH = os.getenv("DATABASE_PATH", str(BASE_DIR / "data" / "app.db"))
 UPLOADS_DIR = os.getenv("UPLOADS_DIR", str(BASE_DIR / "uploads"))
 IP2REGION_PATH = os.getenv("IP2REGION_PATH", str(BASE_DIR / "data" / "ip2region.xdb"))
+IP2REGION_V6_PATH = os.getenv("IP2REGION_V6_PATH", str(BASE_DIR / "data" / "ip2region_v6.xdb"))
 
 # 图片限制
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB

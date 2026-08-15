@@ -1,34 +1,62 @@
-"""IP 归属地查询，基于 ip2region xdb"""
+"""IP 归属地查询，基于 ip2region xdb（支持 IPv4 + IPv6）"""
 import os
-from app.config import IP2REGION_PATH
+import ipaddress
+from app.config import IP2REGION_PATH, IP2REGION_V6_PATH
 
-_searcher = None
+_v4_searcher = None
+_v6_searcher = None
+
+
+def _load_searcher(path: str):
+    """加载指定 xdb 文件，返回 XdbSearcher 或 None"""
+    if not path or not os.path.exists(path):
+        print(f"[WARN] ip2region db not found at {path}, skipped")
+        return None
+    try:
+        from app.xdbSearcher import (
+            XdbSearcher,
+            load_header_from_file,
+            load_vector_index_from_file,
+            version_from_header,
+        )
+        header = load_header_from_file(path)
+        version = version_from_header(header)
+        if version is None:
+            print(f"[WARN] unknown ip version in {path}, skipped")
+            return None
+        vi = load_vector_index_from_file(path)
+        searcher = XdbSearcher(version, dbfile=path, vector_index=vi)
+        print(f"[INFO] ip2region {version.name} loaded from {path}")
+        return searcher
+    except ImportError as e:
+        print(f"[WARN] xdbSearcher module not available: {e}")
+        return None
+    except Exception as e:
+        print(f"[WARN] Failed to load ip2region {path}: {e}")
+        return None
 
 
 def init_ip2region():
-    global _searcher
-    if not os.path.exists(IP2REGION_PATH):
-        print(f"[WARN] ip2region.xdb not found at {IP2REGION_PATH}, IP geo disabled")
-        return
+    global _v4_searcher, _v6_searcher
+    _v4_searcher = _load_searcher(IP2REGION_PATH)
+    _v6_searcher = _load_searcher(IP2REGION_V6_PATH)
+
+
+def _is_ipv6(ip: str) -> bool:
+    """判断 IP 是否为 IPv6 地址"""
     try:
-        # 使用项目内置的纯 Python 实现（app/xdbSearcher.py），无需外部依赖
-        from app.xdbSearcher import loadVectorIndexFromFile
-        vi = loadVectorIndexFromFile(IP2REGION_PATH)
-        from app.xdbSearcher import XdbSearcher
-        _searcher = XdbSearcher(dbfile=IP2REGION_PATH, vectorIndex=vi)
-        print(f"[INFO] ip2region loaded from {IP2REGION_PATH}")
-    except ImportError as e:
-        print(f"[WARN] xdbSearcher module not available: {e}, IP geo disabled")
-    except Exception as e:
-        print(f"[WARN] Failed to load ip2region: {e}, IP geo disabled")
+        return ipaddress.ip_address(ip).version == 6
+    except ValueError:
+        return False
 
 
 def get_ip_location(ip: str):
     """返回 (province, city)"""
-    if _searcher is None:
+    searcher = _v6_searcher if _is_ipv6(ip) else _v4_searcher
+    if searcher is None:
         return ("", "")
     try:
-        result = _searcher.search(ip)
+        result = searcher.search(ip)
         if not result:
             return ("", "")
         parts = result.split("|")

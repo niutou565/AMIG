@@ -15,7 +15,7 @@ data/*.db-shm
 data/*.db-wal
 
 # ===== IP 离线库（需自行下载，体积较大）=====
-data/ip2region.xdb
+data/ip2region*.xdb
 
 # ===== 上传的图片（用户内容，勿提交）=====
 uploads/*
