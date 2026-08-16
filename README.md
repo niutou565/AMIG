@@ -168,8 +168,7 @@
 # 安装依赖
 pip install -r requirements.txt
 
-# 下载 ip2region.xdb 并放入 data/ 目录（可选）
-# https://github.com/lionsoul2014/ip2region/releases
+# ip2region.xdb 已随仓库内置到 data/ 目录（如需更新，从官网下载替换）
 
 # 配置环境变量
 cp .env.example .env   # Windows 手动复制重命名即可
@@ -219,7 +218,8 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 |---|---|---|
 | 纯源码（约 60 个文件） | ~0.25 MB | 不含 `.git` / 虚拟环境 / 数据 |
 | Python 虚拟环境 + 依赖 | ~80–120 MB | Pillow、FastAPI 及传递依赖 |
-| `ip2region.xdb`（可选） | ~11 MB | IP 归属地离线库 |
+| `ip2region.xdb`（已内置） | ~11 MB | IPv4 归属地离线库 |
+| `ip2region_v6.xdb`（已内置） | ~36 MB | IPv6 归属地离线库 |
 | SQLite 数据库 | 数 KB ~ 数十 MB | 随图片记录数量增长 |
 | 运行内存（4 workers 实测） | ~125 MB | 峰值约 125 MB；1 worker 约 30–40 MB |
 | 图片处理瞬时内存 | +100–200 MB | 大图缩放/转码时短暂增加 |
@@ -661,7 +661,7 @@ A：确认后台已开启「上传验证码」；若数字消失，刷新页面�
 A：不能。「拒绝」等同于「删除」，图片文件与记录会彻底移除，操作前请谨慎确认。
 
 **Q：IP 归属地不显示？**
-A：未放置 `data/ip2region.xdb`，或未重启服务。放置后重启即可。
+A：确认 `data/ip2region.xdb` 存在（已随仓库内置），并重启服务即可。
 
 ### 密码与账号类
 

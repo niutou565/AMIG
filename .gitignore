@@ -14,8 +14,10 @@ data/*.db
 data/*.db-shm
 data/*.db-wal
 
-# ===== IP 离线库（需自行下载，体积较大）=====
+# ===== IP 离线库（已内置 v4/v6，如需更新可替换文件）=====
 data/ip2region*.xdb
+!data/ip2region.xdb
+!data/ip2region_v6.xdb
 
 # ===== 上传的图片（用户内容，勿提交）=====
 uploads/*
