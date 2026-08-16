@@ -9,7 +9,7 @@
 - [项目概述](#项目概述)
 - [核心功能](#核心功能)
 - [技术架构](#技术架构)
-- [快速开始（本地 Windows）](#快速开始本地-windows)
+- [快速开始](#快速开始)
 - [生产环境部署](#生产环境部署)
 - [使用指南](#使用指南)
 - [目录结构](#目录结构)
@@ -136,34 +136,58 @@
 
 ---
 
-## 快速开始（本地 Windows）
+## 快速开始
 
-### 1. 环境要求
+项目为三个环境提供了功能一致的一键启动脚本：
 
-- Windows 10/11
-- Python 3.10 ~ 3.13（推荐，含完整预编译依赖包）
+| 环境 | 脚本 | 说明 |
+|------|------|------|
+| Windows | `start.bat` | 双击运行，自动创建并打开浏览器 |
+| Linux（通用） | `start.sh` | 创建 venv 虚拟环境后启动 |
+| 宝塔面板 / 系统 Python | `start_bt.sh` | 使用系统 python3 直接启动（无需 venv） |
+
+三个脚本均会自动完成：检查 Python 环境 → 安装依赖 → 检查 ip2region 库 → 检查/生成 `.env` → 初始化数据库 → 检查端口 → 启动服务。
+
+### 1. 环境要求（通用）
+
+- Python 3.10+（Windows 推荐 3.10–3.13 以使用预编译 Pillow 轮子）
 
 ### 2. 获取代码
 
-将项目代码放置到任意目录（以下以 `C:\amig` 为例）。
+```bash
+git clone https://github.com/niutou565/AMIG.git
+cd AMIG
+```
 
-### 3. 一键启动（推荐）
+或直接下载源码解压到任意目录。
 
-直接双击项目根目录的 **`start.bat`**，脚本会自动完成：
+### 3. Windows 一键启动
 
-1. 检查 Python 环境
-2. 升级 pip 并安装依赖（`requirements.txt`）
-3. 检查 `data/ip2region.xdb`（缺失仅警告，不影响启动）
-4. 检查/生成 `.env` 配置文件
-5. 初始化数据库（首次运行）
-6. 检查并释放端口 8000
-7. 启动 uvicorn 服务并自动打开浏览器
+直接双击项目根目录的 **`start.bat`**，脚本会自动检查环境、安装依赖、初始化数据库并启动服务，随后自动打开浏览器。
 
 启动后访问：`http://127.0.0.1:8000`
 
-> 说明：`start.bat` 已实现完全自动化，全程无需手动输入；若端口被旧实例占用会自动结束旧进程。
+### 4. Linux 一键启动
 
-### 4. 手动启动（可选）
+```bash
+cd AMIG
+chmod +x start.sh
+./start.sh
+```
+
+脚本会创建 `venv` 虚拟环境、安装依赖、初始化数据库并启动服务。
+
+### 5. 宝塔面板 / 系统 Python 一键启动
+
+```bash
+cd AMIG
+chmod +x start_bt.sh
+./start_bt.sh
+```
+
+脚本使用系统 `python3` 直接运行（不创建 venv），自动适配 Debian/Ubuntu 的 PEP 668 限制（`--break-system-packages`），适合宝塔面板环境。
+
+### 6. 手动启动（可选）
 
 ```bash
 # 安装依赖
@@ -172,7 +196,7 @@ pip install -r requirements.txt
 # ip2region.xdb 已随仓库内置到 data/ 目录（如需更新，从官网下载替换）
 
 # 配置环境变量
-cp .env.example .env   # Windows 手动复制重命名即可
+cp .env.example .env
 
 # 初始化数据库（输出管理员密码，请妥善保管）
 python init_db.py
@@ -183,7 +207,7 @@ python run.py
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-### 5. 环境变量说明（.env）
+### 7. 环境变量说明（.env）
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
