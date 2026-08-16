@@ -15,6 +15,7 @@
 - [目录结构](#目录结构)
 - [常见问题解答（FAQ）](#常见问题解答faq)
 - [附录：数据表结构](#附录数据表结构)
+- [第三方软件](#第三方软件)
 
 ---
 
@@ -708,3 +709,13 @@ cd /www/wwwroot/amig && python3 -c "import sqlite3; c=sqlite3.connect('data/app.
 | `cooling` | 冷却机制（拒绝次数、冷却倍数） |
 
 > 数据库文件位于 `data/app.db`，使用 SQLite，可通过 `sqlite3 data/app.db` 或图形化工具（如 DB Browser for SQLite）查看。
+
+---
+
+## 第三方软件
+
+本项目内置了 [ip2region](https://github.com/lionsoul2014/ip2region) 的离线 IP 数据库（`data/ip2region.xdb`、`data/ip2region_v6.xdb`）及其查询客户端（`app/xdbSearcher.py`）。
+
+- 版权：Copyright (c) 2015 Lionsoul <chenxin619315@gmail.com>
+- 许可证：Apache License 2.0 / MIT 双许可
+- 完整声明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
