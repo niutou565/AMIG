@@ -288,6 +288,9 @@ img { max-width: 100%; height: auto; }
 .form-hint { font-size: 0.8rem; color: var(--text-secondary); margin-top: 0.25rem; }
 .required { color: var(--danger); }
 .char-count { font-size: 0.75rem; color: var(--text-secondary); }
+.upload-progress { margin-top: 0.75rem; color: var(--text-secondary); font-size: 0.85rem; }
+.upload-progress-track { height: 8px; overflow: hidden; background: var(--border); border-radius: 4px; }
+.upload-progress-bar { width: 0; height: 100%; background: var(--accent); transition: width 0.15s ease; }
 .checkbox-group label { display: flex; align-items: center; gap: 0.5rem; cursor: pointer; }
 .checkbox-group input[type="checkbox"] { width: auto; }
 

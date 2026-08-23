@@ -5,7 +5,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # 应用版本信息
 APP_NAME = "AMIG"
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.7"
 
 # 从 .env 文件加载环境变量（必须在读取 os.getenv 之前执行，否则 ADMIN_DOMAIN 等不生效）
 _env_path = BASE_DIR / ".env"

@@ -3,7 +3,8 @@ import os
 import hashlib
 import uuid
 from datetime import datetime
-from PIL import Image
+from pathlib import Path
+from PIL import Image, ImageDraw, ImageFont
 from app.config import (
     UPLOADS_DIR, MAX_UPLOAD_SIZE, MAX_IMAGE_PIXELS,
     ALLOWED_EXTENSIONS, MAX_IMAGE_DIMENSION, THUMB_DIMENSION,
@@ -59,9 +60,57 @@ def _atomic_write(path: str, data: bytes):
     os.replace(tmp_path, path)
 
 
-def process_image(file_data: bytes) -> tuple:
+def _watermark_font(size):
+    candidates = (
+        Path("C:/Windows/Fonts/msyh.ttc"),
+        Path("C:/Windows/Fonts/arial.ttf"),
+        Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+    )
+    for path in candidates:
+        if path.exists():
+            try:
+                return ImageFont.truetype(str(path), size)
+            except OSError:
+                pass
+    return ImageFont.load_default()
+
+
+def _draw_watermark(img, watermark_text, author, uploaded_at):
+    if not any((watermark_text, author, uploaded_at)):
+        return img
+    canvas = img.convert("RGBA")
+    draw = ImageDraw.Draw(canvas)
+    padding = max(12, min(canvas.size) // 40)
+    font_size = max(8, min(28, min(canvas.size) // 28))
+    font = _watermark_font(font_size)
+    small_font = _watermark_font(max(8, font_size - 2))
+    gap = max(4, font_size // 4)
+
+    def draw_text(text, font_obj, x, y):
+        draw.text((x + 2, y + 2), text, font=font_obj, fill=(0, 0, 0, 150))
+        draw.text((x, y), text, font=font_obj, fill=(255, 255, 255, 220))
+
+    right_lines = ((f"上传者：{author or '匿名用户'}", small_font), (f"上传时间：{uploaded_at}", small_font))
+    right_heights = [draw.textbbox((0, 0), text, font=font_obj)[3] for text, font_obj in right_lines]
+    right_y = canvas.height - padding - sum(right_heights) - gap
+    for (text, font_obj), height in zip(right_lines, right_heights):
+        text_width = draw.textbbox((0, 0), text, font=font_obj)[2]
+        draw_text(text, font_obj, canvas.width - padding - text_width, right_y)
+        right_y += height
+        if height != right_heights[-1]:
+            right_y += gap
+
+    if watermark_text:
+        text_width = draw.textbbox((0, 0), watermark_text, font=font)[2]
+        text_height = draw.textbbox((0, 0), watermark_text, font=font)[3]
+        draw_text(watermark_text, font, padding, canvas.height - padding - text_height)
+    return canvas.convert("RGB")
+
+
+def process_image(file_data: bytes, watermark_text="", author="", uploaded_at="") -> tuple:
     """
-    处理图片：剥离 EXIF、缩放到最长边 1920、转 WebP、生成缩略图
+    处理图片：剥离 EXIF、缩放到最长边 1920、添加水印、转 WebP、生成缩略图
     返回 (result_dict, error_message)
     result_dict: {filename, thumb_filename, original_size, compressed_size,
                   width, height, content_md5, subdir}
@@ -99,6 +148,8 @@ def process_image(file_data: bytes) -> tuple:
             new_height = int(height * ratio)
             img = img.resize((new_width, new_height), Image.LANCZOS)
             width, height = new_width, new_height
+
+        img = _draw_watermark(img, watermark_text, author, uploaded_at)
 
         # 转 WebP
         output = BytesIO()

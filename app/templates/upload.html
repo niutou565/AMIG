@@ -68,6 +68,10 @@
         </div>
 
         <button type="submit" class="btn btn-primary btn-full" id="submitBtn">提交上传</button>
+        <div id="uploadProgress" class="upload-progress" hidden aria-live="polite">
+            <div class="upload-progress-track"><div id="uploadProgressBar" class="upload-progress-bar"></div></div>
+            <span id="uploadProgressText">准备上传 0%</span>
+        </div>
     </form>
 </div>
 {% endblock %}
@@ -141,8 +145,40 @@
             alert('请先完成人机验证');
             return;
         }
+        e.preventDefault();
         submitBtn.disabled = true;
         submitBtn.textContent = '上传中...';
+        const progress = document.getElementById('uploadProgress');
+        const progressBar = document.getElementById('uploadProgressBar');
+        const progressText = document.getElementById('uploadProgressText');
+        progress.hidden = false;
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', form.action, true);
+        xhr.upload.addEventListener('progress', function(event) {
+            if (!event.lengthComputable) return;
+            const percent = Math.min(100, Math.round(event.loaded / event.total * 100));
+            progressBar.style.width = percent + '%';
+            progressText.textContent = '上传中 ' + percent + '%';
+        });
+        xhr.onload = function() {
+            if (xhr.status >= 200 && xhr.status < 400) {
+                progressBar.style.width = '100%';
+                progressText.textContent = '上传完成，正在处理图片...';
+                document.open();
+                document.write(xhr.responseText);
+                document.close();
+            } else {
+                progressText.textContent = '上传失败，请重试';
+                submitBtn.disabled = false;
+                submitBtn.textContent = '提交上传';
+            }
+        };
+        xhr.onerror = function() {
+            progressText.textContent = '网络错误，请重试';
+            submitBtn.disabled = false;
+            submitBtn.textContent = '提交上传';
+        };
+        xhr.send(new FormData(form));
     });
 })();
 </script>

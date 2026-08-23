@@ -93,6 +93,13 @@
         </div>
     </div>
 
+    <h3>图片水印</h3>
+    <div class="form-group">
+        <label>左下角水印文字</label>
+        <input type="text" name="watermark_text" value="{{ settings.get('watermark_text', '') }}" maxlength="80" placeholder="例如：91bus.top">
+        <p class="form-hint">上传图片时自动添加。右下角会同时显示上传者和上传时间。</p>
+    </div>
+
     <h3>安全设置</h3>
     <div class="form-group">
         <label>敏感词列表（逗号分隔）</label>

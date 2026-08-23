@@ -37,9 +37,9 @@ templates.env.filters["safe_color"] = safe_color
 _upload_semaphore = threading.Semaphore(4)
 
 
-def _process_image_limited(file_data):
+def _process_image_limited(file_data, watermark_text, author, uploaded_at):
     with _upload_semaphore:
-        return process_image(file_data)
+        return process_image(file_data, watermark_text, author, uploaded_at)
 
 
 def get_settings_context():
@@ -281,7 +281,11 @@ async def upload_action(
         return templates.TemplateResponse(request, "upload.html", {**ctx, "error": err_msg})
 
     # 处理图片（在独立线程池中执行，避免阻塞事件循环；并发受信号量限制）
-    result, err_msg = await run_in_threadpool(_process_image_limited, file_data)
+    uploaded_at = now_iso()
+    watermark_text = get_setting("watermark_text", "").strip()
+    result, err_msg = await run_in_threadpool(
+        _process_image_limited, file_data, watermark_text, author, uploaded_at
+    )
     if not result:
         return templates.TemplateResponse(request, "upload.html", {**ctx, "error": f"图片处理失败：{err_msg}"})
 
@@ -290,8 +294,8 @@ async def upload_action(
         is_dup = check_content_md5_duplicate(result["content_md5"], ip)
         if is_dup:
             from app.models import insert_image
-            province, city = get_ip_location(ip)
-            region = get_ip_region(ip)
+            province, city = await run_in_threadpool(get_ip_location, ip)
+            region = await run_in_threadpool(get_ip_region, ip)
             img_id = insert_image(
                 result["filename"], result["thumb_filename"],
                 result["original_size"], result["compressed_size"],

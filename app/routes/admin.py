@@ -22,7 +22,7 @@ from app.models import (
 )
 from app.stats import get_dashboard_data, invalidate_top_cache
 from app.auth import login, get_current_admin, hash_password, destroy_session, check_login_ip_limit
-from app.middleware import validate_csrf, load_sensitive_words
+from app.middleware import validate_csrf, load_sensitive_words, _secure_cookie_for_request
 from app.image_utils import delete_image_files
 from app.ip_geo import get_client_ip
 from app.display import safe_color
@@ -513,7 +513,7 @@ async def admin_settings_save(request: Request, csrf_token: str = Form("")):
         "theme_accent_color", "upload_limit_per_ip", "upload_limit_per_ua",
         "upload_limit_daily_total", "upload_interval_seconds",
         "like_limit_per_minute", "top_window_days", "top_show_count",
-        "allow_author", "enable_captcha", "enable_dedup", "sensitive_words",
+        "watermark_text", "allow_author", "enable_captcha", "enable_dedup", "sensitive_words",
         "turnstile_site_key",
     ]
 
