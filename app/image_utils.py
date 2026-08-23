@@ -94,15 +94,14 @@ def _draw_watermark(img, watermark_text, author, uploaded_at):
     right_lines = ((f"上传者：{author or '匿名用户'}", small_font), (f"上传时间：{uploaded_at}", small_font))
     right_heights = [draw.textbbox((0, 0), text, font=font_obj)[3] for text, font_obj in right_lines]
     right_y = canvas.height - padding - sum(right_heights) - gap
-    for (text, font_obj), height in zip(right_lines, right_heights):
+    for index, ((text, font_obj), height) in enumerate(zip(right_lines, right_heights)):
         text_width = draw.textbbox((0, 0), text, font=font_obj)[2]
         draw_text(text, font_obj, canvas.width - padding - text_width, right_y)
         right_y += height
-        if height != right_heights[-1]:
+        if index < len(right_lines) - 1:
             right_y += gap
 
     if watermark_text:
-        text_width = draw.textbbox((0, 0), watermark_text, font=font)[2]
         text_height = draw.textbbox((0, 0), watermark_text, font=font)[3]
         draw_text(watermark_text, font, padding, canvas.height - padding - text_height)
     return canvas.convert("RGB")

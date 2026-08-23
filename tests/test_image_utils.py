@@ -5,7 +5,7 @@ import shutil
 import tempfile
 import unittest
 
-from PIL import Image
+from PIL import Image, ImageChops
 
 import app.image_utils as iu
 
@@ -114,6 +114,27 @@ class TestProcessImage(unittest.TestCase):
         self.assertEqual(err, "")
         self.assertEqual(res["width"], 10)
         self.assertEqual(res["height"], 20)
+
+    def test_process_applies_watermark_to_original_and_thumbnail(self):
+        data = _make_image_bytes("PNG", size=(400, 300), color=(40, 120, 220))
+        plain, err = iu.process_image(data)
+        self.assertEqual(err, "")
+        watermarked, err = iu.process_image(
+            data,
+            watermark_text="AMIG TEST",
+            author="tester",
+            uploaded_at="2026-08-24T12:34:56+00:00",
+        )
+        self.assertEqual(err, "")
+
+        for key in ("filename", "thumb_filename"):
+            plain_path = os.path.join(self.tmpdir, plain[key])
+            watermarked_path = os.path.join(self.tmpdir, watermarked[key])
+            with Image.open(plain_path) as plain_img, Image.open(watermarked_path) as marked_img:
+                difference = ImageChops.difference(
+                    plain_img.convert("RGB"), marked_img.convert("RGB")
+                )
+                self.assertIsNotNone(difference.getbbox(), f"{key} 未应用水印")
 
 
 if __name__ == "__main__":
