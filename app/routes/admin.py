@@ -508,6 +508,15 @@ async def admin_settings_save(request: Request, csrf_token: str = Form("")):
         return RedirectResponse(url="/admin/settings", status_code=302)
 
     form = await request.form()
+    enable_captcha = form.get("enable_captcha") == "on"
+    site_key = form.get("turnstile_site_key", "").strip()
+    secret_key = form.get("turnstile_secret_key", "").strip() or get_setting("turnstile_secret_key", "").strip()
+    if enable_captcha and (not site_key or not secret_key):
+        ctx = get_admin_context(request)
+        ctx["settings"] = {**get_all_settings(), "turnstile_site_key": site_key}
+        ctx["error"] = "开启人机验证前，必须同时配置 Site Key 和 Secret Key"
+        return templates.TemplateResponse(request, "admin/settings.html", ctx)
+
     setting_keys = [
         "site_name", "site_description", "footer_icp", "footer_copyright",
         "theme_accent_color", "upload_limit_per_ip", "upload_limit_per_ua",
@@ -674,7 +683,6 @@ async def admin_logs(
     page: int = 1,
     action: str = "",
     ip: str = "",
-    location: str = "",
     q: str = "",
     date_from: str = "",
     date_to: str = "",
@@ -692,7 +700,6 @@ async def admin_logs(
     ctx["logs"] = search_admin_logs(
         action=action or None,
         ip=ip.strip() or None,
-        location=location.strip() or None,
         query=query,
         date_from=df or None,
         date_to=dt or None,
@@ -701,7 +708,6 @@ async def admin_logs(
     ctx["total"] = count_admin_logs(
         action=action or None,
         ip=ip.strip() or None,
-        location=location.strip() or None,
         query=query,
         date_from=df or None,
         date_to=dt or None,
@@ -710,7 +716,6 @@ async def admin_logs(
     ctx["total_pages"] = max(1, (ctx["total"] + 50 - 1) // 50)
     ctx["action"] = action
     ctx["ip"] = ip
-    ctx["location"] = location
     ctx["q"] = q
     ctx["date_from"] = date_from
     ctx["date_to"] = date_to

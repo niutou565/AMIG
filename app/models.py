@@ -629,16 +629,14 @@ def insert_admin_log(admin_id, admin_name, action, detail="", target="", ip=None
     db = get_db()
     if ip is None:
         ip = _current_admin_ip.get()
-    if location is None:
-        location = ""
     db.execute(
-        "INSERT INTO admin_logs (admin_id, admin_name, action, detail, target, ip, location, created_at) VALUES (?,?,?,?,?,?,?,?)",
-        (admin_id, admin_name, action, detail, target, ip, location, now_iso())
+        "INSERT INTO admin_logs (admin_id, admin_name, action, detail, target, ip, created_at) VALUES (?,?,?,?,?,?,?)",
+        (admin_id, admin_name, action, detail, target, ip, now_iso())
     )
     db.commit()
 
 
-def search_admin_logs(action=None, ip=None, location=None, query=None,
+def search_admin_logs(action=None, ip=None, query=None,
                       date_from=None, date_to=None, limit=50, offset=0):
     """搜索操作日志。
 
@@ -654,9 +652,6 @@ def search_admin_logs(action=None, ip=None, location=None, query=None,
     if ip:
         conditions.append("ip LIKE ?")
         params.append(f"%{ip}%")
-    if location:
-        conditions.append("location LIKE ?")
-        params.append(f"%{location}%")
     if query:
         conditions.append("(detail LIKE ? OR target LIKE ? OR admin_name LIKE ?)")
         q = f"%{query}%"
@@ -674,7 +669,7 @@ def search_admin_logs(action=None, ip=None, location=None, query=None,
     ).fetchall()
 
 
-def count_admin_logs(action=None, ip=None, location=None, query=None,
+def count_admin_logs(action=None, ip=None, query=None,
                      date_from=None, date_to=None):
     db = get_db()
     conditions = []
@@ -685,9 +680,6 @@ def count_admin_logs(action=None, ip=None, location=None, query=None,
     if ip:
         conditions.append("ip LIKE ?")
         params.append(f"%{ip}%")
-    if location:
-        conditions.append("location LIKE ?")
-        params.append(f"%{location}%")
     if query:
         conditions.append("(detail LIKE ? OR target LIKE ? OR admin_name LIKE ?)")
         q = f"%{query}%"

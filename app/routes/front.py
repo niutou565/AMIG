@@ -24,6 +24,7 @@ from app.ban import check_ban_status
 from app.image_utils import validate_image, process_image
 from app.middleware import check_sensitive
 from app.display import uploader_label, safe_color
+import logging
 import os
 import threading
 import httpx
@@ -70,25 +71,38 @@ def get_common_context(request: Request):
     return ctx
 
 
-async def verify_turnstile(token: str, ip: str) -> bool:
-    """服务端校验 Cloudflare Turnstile token，返回是否通过。
+logger = logging.getLogger(__name__)
 
-    始终在后端调用 siteverify，前端 token 仅作为一次性的凭据。
-    校验成功与否只依据 Cloudflare 返回的 success 字段。
-    """
-    secret = get_setting("turnstile_secret_key", "")
-    if not secret or not token:
-        return False
+
+async def verify_turnstile(token: str, ip: str) -> tuple[bool, str]:
+    """服务端校验 Cloudflare Turnstile token，返回结果及安全的用户提示。"""
+    secret = get_setting("turnstile_secret_key", "").strip()
+    if not secret:
+        return False, "人机验证配置不完整，请联系管理员"
+    if not token:
+        return False, "请完成人机验证"
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
+            response = await client.post(
                 "https://challenges.cloudflare.com/turnstile/v0/siteverify",
                 data={"secret": secret, "response": token, "remoteip": ip},
             )
-            result = resp.json()
-    except Exception:
-        return False
-    return bool(result.get("success"))
+            response.raise_for_status()
+            result = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning("Turnstile 校验请求失败: %s", exc)
+        return False, "人机验证服务暂时不可用，请稍后重试"
+
+    if result.get("success"):
+        return True, ""
+
+    error_codes = result.get("error-codes", [])
+    logger.warning("Turnstile 校验被拒绝: %s", error_codes)
+    if "timeout-or-duplicate" in error_codes:
+        return False, "人机验证已过期，请重新验证后提交"
+    if "invalid-input-secret" in error_codes or "missing-input-secret" in error_codes:
+        return False, "人机验证配置异常，请联系管理员"
+    return False, "人机验证失败，请重新验证后提交"
 
 
 # ========== 首页 ==========
@@ -224,11 +238,9 @@ async def upload_action(
     # 人机验证（Cloudflare Turnstile）
     ip = get_client_ip(request)
     if get_setting("enable_captcha", "0") == "1":
-        token = turnstile_response.strip()
-        if not token:
-            return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "请完成人机验证"})
-        if not await verify_turnstile(token, ip):
-            return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "人机验证失败，请重试"})
+        verified, captcha_error = await verify_turnstile(turnstile_response.strip(), ip)
+        if not verified:
+            return templates.TemplateResponse(request, "upload.html", {**ctx, "error": captcha_error})
 
     # 输入校验
     title = title.strip()[:MAX_TITLE_LENGTH]

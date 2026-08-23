@@ -9,8 +9,10 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 from PIL import Image
 
+import app.auth as auth
 import app.database as database
 import app.image_utils as image_utils
+import app.ip_geo as ip_geo
 import app.models as models
 import app.routes.front as front
 from app.auth import hash_password
@@ -54,6 +56,7 @@ class FeatureIntegrationTest(unittest.TestCase):
         return match.group(1)
 
     def login(self, client):
+        auth._login_ip_attempts.clear()
         page = client.get("/admin/login")
         self.assertEqual(page.status_code, 200)
         token = self.csrf(page)
@@ -72,7 +75,22 @@ class FeatureIntegrationTest(unittest.TestCase):
         Image.new("RGB", size, (40, 120, 220)).save(stream, format=fmt)
         return stream.getvalue()
 
+    def test_ip_geolocation_uses_configured_timeout_and_cache(self):
+        ip_geo._cache.clear()
+        response = b'{"status":"success","country":"China","regionName":"Beijing","city":"Beijing"}'
+        with patch.object(ip_geo.urllib.request, "urlopen") as urlopen:
+            urlopen.return_value.__enter__.return_value.read.return_value = response
+            with patch.object(ip_geo, "IP_API_TIMEOUT", 1.25):
+                self.assertEqual(ip_geo.get_ip_location("8.8.8.8"), ("Beijing", "Beijing"))
+                self.assertEqual(ip_geo.get_ip_region("8.8.8.8"), "cn")
+            urlopen.assert_called_once()
+            self.assertEqual(urlopen.call_args.kwargs["timeout"], 1.25)
+        self.assertEqual(ip_geo.get_ip_location("127.0.0.1"), ("", ""))
+
     def test_upload_png_saves_original_thumbnail_and_database_row(self):
+        before = database.get_db().execute(
+            "SELECT COALESCE(SUM(upload_count), 0) AS upload_count FROM daily_stats"
+        ).fetchone()["upload_count"]
         client = self.client("upload.test")
         with patch.object(front, "get_client_ip", return_value="10.0.0.11"), \
              patch.object(front, "get_ip_location", return_value=("测试省", "测试市")), \
@@ -86,7 +104,10 @@ class FeatureIntegrationTest(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 200)
         self.assertIn("已提交", response.text)
-        row = database.get_db().execute("SELECT * FROM images").fetchone()
+        row = database.get_db().execute(
+            "SELECT * FROM images WHERE title=? ORDER BY id DESC LIMIT 1",
+            ("测试图片",),
+        ).fetchone()
         self.assertIsNotNone(row)
         self.assertEqual(row["title"], "测试图片")
         self.assertEqual(row["status"], "pending")
@@ -98,8 +119,10 @@ class FeatureIntegrationTest(unittest.TestCase):
         for path in (original_path, thumb_path):
             with Image.open(path) as saved:
                 self.assertEqual(saved.format, "WEBP")
-        stat = database.get_db().execute("SELECT upload_count FROM daily_stats").fetchone()
-        self.assertEqual(stat["upload_count"], 1)
+        after = database.get_db().execute(
+            "SELECT COALESCE(SUM(upload_count), 0) AS upload_count FROM daily_stats"
+        ).fetchone()["upload_count"]
+        self.assertEqual(after - before, 1)
 
     def test_upload_supports_jpeg_webp_and_rejects_oversize(self):
         for index, fmt in enumerate(("JPEG", "WEBP"), start=40):
@@ -174,11 +197,79 @@ class FeatureIntegrationTest(unittest.TestCase):
                     data={"csrf_token": self.csrf(page), "title": "测试", "agree": "1"},
                     files={"image": ("sample.png", self.image_bytes(), "image/png")},
                 )
-            self.assertIn("请完成人机验证", response.text)
+            self.assertIn("人机验证配置不完整", response.text)
         finally:
             models.set_setting("enable_captcha", "0")
 
+    def test_turnstile_success_allows_upload(self):
+        models.set_setting("enable_captcha", "1")
+        models.set_setting("turnstile_site_key", "site-key")
+        models.set_setting("turnstile_secret_key", "secret-key")
+        try:
+            client = self.client("upload.test")
+            with patch.object(front, "get_client_ip", return_value="10.0.0.33"), \
+                 patch.object(front, "verify_turnstile", return_value=(True, "")) as verify:
+                page = client.get("/upload")
+                response = client.post(
+                    "/upload",
+                    data={
+                        "csrf_token": self.csrf(page),
+                        "title": "Turnstile 成功",
+                        "agree": "1",
+                        "cf-turnstile-response": "valid-token",
+                    },
+                    files={"image": ("sample.png", self.image_bytes(), "image/png")},
+                )
+            self.assertIn("已提交", response.text)
+            verify.assert_called_once_with("valid-token", "10.0.0.33")
+        finally:
+            models.set_setting("enable_captcha", "0")
+            models.set_setting("turnstile_site_key", "")
+            models.set_setting("turnstile_secret_key", "")
+
+    def test_turnstile_failure_returns_specific_message(self):
+        models.set_setting("enable_captcha", "1")
+        models.set_setting("turnstile_secret_key", "secret-key")
+        try:
+            client = self.client("upload.test")
+            with patch.object(front, "get_client_ip", return_value="10.0.0.34"), \
+                 patch.object(front, "verify_turnstile", return_value=(False, "人机验证已过期，请重新验证后提交")):
+                page = client.get("/upload")
+                response = client.post(
+                    "/upload",
+                    data={
+                        "csrf_token": self.csrf(page),
+                        "title": "Turnstile 失败",
+                        "agree": "1",
+                        "cf-turnstile-response": "expired-token",
+                    },
+                    files={"image": ("sample.png", self.image_bytes(), "image/png")},
+                )
+            self.assertIn("人机验证已过期", response.text)
+        finally:
+            models.set_setting("enable_captcha", "0")
+            models.set_setting("turnstile_secret_key", "")
+
+    def test_turnstile_settings_require_both_keys(self):
+        client = self.client()
+        self.login(client)
+        settings_page = client.get("/admin/settings")
+        response = client.post(
+            "/admin/settings",
+            data={
+                "csrf_token": self.csrf(settings_page),
+                "enable_captcha": "on",
+                "turnstile_site_key": "site-key",
+                "turnstile_secret_key": "",
+            },
+        )
+        self.assertIn("必须同时配置", response.text)
+        models.set_setting("enable_captcha", "0")
+        self.assertEqual(models.get_setting("enable_captcha"), "0")
+
     def test_watermark_setting_and_upload_progress_ui(self):
+        database.get_db().execute("UPDATE admins SET login_attempts=0, locked_until=NULL")
+        database.get_db().commit()
         client = self.client()
         self.login(client)
         settings_page = client.get("/admin/settings")

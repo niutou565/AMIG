@@ -27,7 +27,6 @@
             <option value="change_password" {% if action == 'change_password' %}selected{% endif %}>修改密码</option>
         </select>
         <input type="text" name="ip" placeholder="IP 地址" value="{{ ip }}">
-        <input type="text" name="location" placeholder="地理位置" value="{{ location }}">
         <input type="date" name="date_from" value="{{ date_from }}" title="开始日期">
         <input type="date" name="date_to" value="{{ date_to }}" title="结束日期">
         <button type="submit" class="btn btn-sm btn-primary">搜索</button>
@@ -52,7 +51,6 @@
             <th>详情</th>
             <th>目标</th>
             <th>IP 地址</th>
-            <th>地理位置</th>
         </tr>
     </thead>
     <tbody>
@@ -64,11 +62,10 @@
             <td>{{ log.detail | highlight(q) }}</td>
             <td class="log-target">{{ log.target | highlight(q) }}</td>
             <td>{{ log.ip or '-' }}</td>
-            <td>{{ log.location or '-' }}</td>
         </tr>
         {% else %}
         <tr>
-            <td colspan="7" class="empty-tip">暂无日志</td>
+            <td colspan="6" class="empty-tip">暂无日志</td>
         </tr>
         {% endfor %}
     </tbody>

@@ -55,8 +55,26 @@
         {% if enable_captcha and turnstile_site_key %}
         <div class="form-group">
             <label>人机验证</label>
-            <div class="cf-turnstile" data-sitekey="{{ turnstile_site_key }}" data-theme="auto"></div>
+            <div class="cf-turnstile" data-sitekey="{{ turnstile_site_key }}" data-theme="auto" data-callback="turnstileVerified" data-expired-callback="turnstileExpired" data-error-callback="turnstileError"></div>
+            <p class="form-hint" id="turnstileStatus" aria-live="polite">请完成人机验证后提交</p>
         </div>
+        <script>
+        function turnstileVerified(token) {
+            var input = document.querySelector('input[name="cf-turnstile-response"]');
+            if (input) input.value = token;
+            document.getElementById('turnstileStatus').textContent = '人机验证完成';
+        }
+        function turnstileExpired() {
+            var input = document.querySelector('input[name="cf-turnstile-response"]');
+            if (input) input.value = '';
+            document.getElementById('turnstileStatus').textContent = '人机验证已过期，请重新验证';
+        }
+        function turnstileError() {
+            var input = document.querySelector('input[name="cf-turnstile-response"]');
+            if (input) input.value = '';
+            document.getElementById('turnstileStatus').textContent = '人机验证加载失败，请刷新页面重试';
+        }
+        </script>
         <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
         {% endif %}
 
@@ -171,12 +189,14 @@
                 progressText.textContent = '上传失败，请重试';
                 submitBtn.disabled = false;
                 submitBtn.textContent = '提交上传';
+                if (window.turnstile) turnstile.reset();
             }
         };
         xhr.onerror = function() {
             progressText.textContent = '网络错误，请重试';
             submitBtn.disabled = false;
             submitBtn.textContent = '提交上传';
+            if (window.turnstile) turnstile.reset();
         };
         xhr.send(new FormData(form));
     });

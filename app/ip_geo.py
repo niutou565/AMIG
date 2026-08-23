@@ -29,7 +29,7 @@ def _lookup(ip: str):
     now = time.monotonic()
     with _cache_lock:
         cached = _cache.get(ip)
-        if cached and now - cached[0] < _IP_API_CACHE_TTL:
+        if cached and now - cached[0] < IP_API_CACHE_TTL:
             return cached[1]
         if cached:
             del _cache[ip]
@@ -41,7 +41,7 @@ def _lookup(ip: str):
             url,
             headers={"User-Agent": "AMIG-IP-Geo/1.0"},
         )
-        with urllib.request.urlopen(request, timeout=_IP_API_TIMEOUT) as response:
+        with urllib.request.urlopen(request, timeout=IP_API_TIMEOUT) as response:
             result = response.read().decode("utf-8")
         data = json.loads(result)
         if data.get("status") != "success":

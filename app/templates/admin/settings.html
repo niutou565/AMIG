@@ -4,6 +4,7 @@
 {% block content %}
 <h1>站点设置</h1>
 
+{% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
 <form method="post" action="/admin/settings" enctype="multipart/form-data">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 

@@ -159,9 +159,9 @@ class TestAdminLogs(DbTestCase):
         rows = models.search_admin_logs(ip="1.1.1.1")
         self.assertEqual(len(rows), 2)
 
-        rows = models.search_admin_logs(location="海外")
+        rows = models.search_admin_logs(ip="2.2.2.2")
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["location"], "海外IP 美国")
+        self.assertEqual(rows[0]["location"], "")
 
         self.assertEqual(models.count_admin_logs(action="delete"), 1)
 
