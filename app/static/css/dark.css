@@ -388,9 +388,40 @@ img { max-width: 100%; height: auto; }
     .nav-toggle { display: block; }
     .page-header { flex-direction: column; align-items: stretch; }
     .form-row { flex-direction: column; }
+
+    /* 防止 iOS Safari 聚焦输入框时自动放大页面（字号需 ≥16px） */
+    input[type="text"], input[type="number"], input[type="password"],
+    input[type="email"], input[type="search"], input[type="url"],
+    input[type="tel"], input[type="date"], select, textarea {
+        font-size: 16px;
+    }
+    /* 移动端增大可点击区域（最小约 44px） */
+    .nav-toggle { min-width: 44px; min-height: 44px; display: flex; align-items: center; justify-content: center; }
+    .nav-brand { min-height: 44px; }
+    .nav-links { align-items: stretch; }
+    .nav-links a { padding: 0.75rem 0.5rem; text-align: left; }
+    .page-link { padding: 0.6rem 0.85rem; }
+    .btn-sm { padding: 0.5rem 0.8rem; }
+    .search-btn { padding: 0.75rem 1.25rem; }
+    .btn-full { min-height: 44px; }
+    .search-btn { min-height: 44px; }
+    .section-link { padding: 0.5rem; display: inline-block; }
+    .footer-links a, .footer-pages a { padding: 0.5rem; display: inline-block; }
+    .sort-form select { min-height: 44px; }
+    .checkbox-group label { min-height: 44px; }
+    .checkbox-group a { padding: 0.25rem 0; display: inline-block; }
 }
 @media (max-width: 480px) {
-    .image-grid { grid-template-columns: repeat(2, 1fr); }
+    .image-grid { grid-template-columns: repeat(2, 1fr); gap: 0.5rem; }
     .top-item { flex-wrap: wrap; }
     .top-thumb { width: 60px; height: 45px; }
+    .hero { padding: 2rem 0.75rem; }
+    .hero-title { font-size: 1.6rem; }
+    .main-content { padding: 1.25rem 0.75rem; }
+    .search-form { flex-direction: column; }
+    .search-btn { width: 100%; }
+    .detail-title { font-size: 1.25rem; }
+    .detail-desc { font-size: 1rem; }
+    .card-info { padding: 0.5rem; }
+    .card-desc { font-size: 0.8rem; }
 }

@@ -86,7 +86,7 @@
 | 模板引擎 | Jinja2 |
 | 数据库 | SQLite（WAL 模式） |
 | 图片处理 | Pillow |
-| IP 归属地 | ip2region（离线 xdb） |
+| IP 归属地 | ip-api.com（公网 API，带缓存与失败降级） |
 | 密码哈希 | bcrypt |
 | 前端 | 原生 HTML/CSS/JS，无框架 |
 
@@ -118,7 +118,7 @@
 | `app/auth.py` | 登录、Session（数据库持久化）、密码哈希、登录锁定 |
 | `app/limiter.py` | 上传/点赞限流、冷却机制 |
 | `app/ban.py` | 封禁检查 |
-| `app/ip_geo.py` | ip2region 封装、客户端 IP 获取 |
+| `app/ip_geo.py` | ip-api.com 归属地查询、客户端 IP 获取 |
 | `app/image_utils.py` | 图片校验、WebP 转换、缩略图、EXIF 剥离 |
 | `app/stats.py` | 统计数据、热度榜缓存 |
 
@@ -126,7 +126,7 @@
 
 - **CSRF 防护**：中间件自动下发 CSRF Cookie，表单 + Cookie 双重校验
 - **蜜罐字段**：隐藏表单字段，机器人填写即拒绝
-- **验证码**：上传页可选加减法验证码（后台开关）
+- **人机验证**：上传页可选 Cloudflare Turnstile（后台配置开关、Site Key 和 Secret Key）
 - **限流**：上传按 IP/UA/全站三层限制 + 冷却倍数递增；点赞按分钟限流
 - **封禁**：IP 精确、CIDR 段、UA 哈希三种维度
 - **登录锁定**：连续失败 5 次锁定 15 分钟
@@ -146,7 +146,7 @@
 | Linux（通用） | `start.sh` | 创建 venv 虚拟环境后启动 |
 | 宝塔面板 / 系统 Python | `start_bt.sh` | 使用系统 python3 直接启动（无需 venv） |
 
-三个脚本均会自动完成：检查 Python 环境 → 安装依赖 → 检查 ip2region 库 → 检查/生成 `.env` → 初始化数据库 → 检查端口 → 启动服务。
+三个脚本均会自动完成：检查 Python 环境 → 安装依赖 → 检查/生成 `.env` → 初始化数据库 → 检查端口 → 启动服务。
 
 ### 1. 环境要求（通用）
 
@@ -193,8 +193,6 @@ chmod +x start_bt.sh
 # 安装依赖
 pip install -r requirements.txt
 
-# ip2region.xdb 已随仓库内置到 data/ 目录（如需更新，从官网下载替换）
-
 # 配置环境变量
 cp .env.example .env
 
@@ -214,7 +212,8 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 | `ADMIN_DOMAIN` | 管理域名，多个逗号分隔，上线必填 | 空 |
 | `DATABASE_PATH` | 数据库路径 | `data/app.db` |
 | `UPLOADS_DIR` | 上传目录 | `uploads` |
-| `IP2REGION_PATH` | ip2region 库路径 | `data/ip2region.xdb` |
+| `IP_API_TIMEOUT` | ip-api.com 请求超时时间（秒） | `3` |
+| `IP_API_CACHE_TTL` | IP 归属地缓存时间（秒） | `300` |
 | `TRUSTED_PROXIES` | 可信反向代理地址（逗号分隔），仅这些来源的 `X-Real-IP` 会被信任 | `127.0.0.1,::1,localhost` |
 
 ---
@@ -235,7 +234,7 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 | 数据库 | SQLite（无需独立安装） |
 | 反向代理 | Nginx（1.18+，含 `proxy_pass` 模块） |
 | 进程管理 | systemd |
-| 可选 | `data/ip2region.xdb`（IP 归属地离线库，缺失仅停用该功能） |
+| 网络 | 服务器可访问 `ip-api.com`（仅上传和点赞时查询，带缓存与失败降级） |
 
 #### 资源占用参考（实测）
 
@@ -243,8 +242,6 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 |---|---|---|
 | 纯源码（约 60 个文件） | ~0.25 MB | 不含 `.git` / 虚拟环境 / 数据 |
 | Python 虚拟环境 + 依赖 | ~80–120 MB | Pillow、FastAPI 及传递依赖 |
-| `ip2region.xdb`（已内置） | ~11 MB | IPv4 归属地离线库 |
-| `ip2region_v6.xdb`（已内置） | ~36 MB | IPv6 归属地离线库 |
 | SQLite 数据库 | 数 KB ~ 数十 MB | 随图片记录数量增长 |
 | 运行内存（4 workers 实测） | ~125 MB | 峰值约 125 MB；1 worker 约 30–40 MB |
 | 图片处理瞬时内存 | +100–200 MB | 大图缩放/转码时短暂增加 |
@@ -322,9 +319,10 @@ ADMIN_DOMAIN=admin.example.com
 ```ini
 DATABASE_PATH=data/app.db
 UPLOADS_DIR=uploads
-IP2REGION_PATH=data/ip2region.xdb
-# 可信反向代理地址（逗号分隔），仅这些来源的 X-Real-IP 会被信任
-# 默认 127.0.0.1,::1,localhost；如使用 Cloudflare 需把其回源 IP 段加入
+IP_API_TIMEOUT=3
+IP_API_CACHE_TTL=300
+# 可信反向代理 IP、主机名或 CIDR（逗号分隔），仅这些来源的 X-Real-IP 会被信任
+# 默认 127.0.0.1,::1,localhost；直连 Cloudflare 回源时需加入其官方出口网段
 TRUSTED_PROXIES=127.0.0.1,::1,localhost
 ```
 
@@ -332,13 +330,9 @@ TRUSTED_PROXIES=127.0.0.1,::1,localhost
 > 1. **并集生效**：`.env` / systemd 的 `ADMIN_DOMAIN` 与数据库 `admin_domain` 是**并集**（都会被放行），不会互相覆盖。若想彻底停用旧域名，需同时更新 `.env`、systemd 的 `Environment` 与数据库三处。
 > 2. **先解析 + 配置 Nginx**：改为新域名前，必须先完成 DNS 解析，并把新域名加入 Nginx 的 `server_name`，否则新域名无法访问到应用。
 
-### 5. 放置 IP 归属地库（可选）
+### 5. IP 归属地查询
 
-```bash
-mkdir -p data
-# 下载 ip2region.xdb 放入 data/ 目录
-# 下载地址：https://github.com/lionsoul2014/ip2region/releases
-```
+上传和点赞会通过 `ip-api.com` 查询公网 IP 的归属地。查询结果默认缓存 300 秒；网络不可用、私有地址或查询失败时会保留为空，不影响上传和点赞。
 
 ### 6. 初始化数据库
 
@@ -536,6 +530,9 @@ chmod -R 755 data uploads
    tar -czf backup-$(date +%Y%m%d).tar.gz data/app.db uploads/
    ```
 6. **回滚**：`git revert <commit>` 后重启服务；或恢复代码备份后重启。
+7. **安全响应头**：应用已内置 `SecurityHeadersMiddleware` 自动添加 `X-Content-Type-Options: nosniff`、`X-Frame-Options: SAMEORIGIN`、`Referrer-Policy`、`Content-Security-Policy` 及 `Strict-Transport-Security`（默认 `max-age=31536000; includeSubDomains`）。若使用 Cloudflare，请在面板中开启 HSTS 并勾选 **Include Subdomains**（覆盖管理子域名）。
+8. **Cookie 安全标志**：生产环境请确保 `.env` 中 `COOKIE_SECURE=true`（默认已启用），使后台会话与 CSRF Cookie 仅在 HTTPS 下传输。
+9. **依赖漏洞扫描**：定期执行 `pip-audit -r requirements.txt`（或 `safety check`），并及时升级 `python-multipart`、`starlette`、`Pillow` 等存在历史 CVE 的组件。
 
 ---
 
@@ -576,7 +573,7 @@ chmod -R 755 data uploads
 
 #### 操作日志
 
-- 记录所有管理员操作（登录、审核、编辑、设置、封禁等），支持按关键词、操作类型、IP、地理位置、日期范围模糊搜索
+- 记录所有管理员操作（登录、审核、编辑、设置、封禁等），支持按关键词、操作类型、IP、日期范围模糊搜索；管理员操作仅记录 IP，不查询外部归属地服务
 - 搜索关键词会在结果中高亮显示，方便快速定位（如按图片编号 `image#123` 检索）
 
 #### 修改密码
@@ -588,14 +585,14 @@ chmod -R 755 data uploads
 在服务器项目根目录（宝塔终端）执行：
 
 ```bash
-python reset_password.py                # 交互式确认后重置为 abcd1234
-python reset_password.py --yes          # 跳过确认直接重置
-python reset_password.py --password 你的密码 --yes   # 自定义密码
+python reset_password.py                         # 交互式输入并确认新密码
+python reset_password.py --yes                   # 生成随机强密码并直接重置
+python reset_password.py --password 你的密码 --yes # 指定新密码并直接重置
 ```
 
-- 默认将管理员密码重置为 `abcd1234`
+- 新密码至少 8 位
 - 同时清除登录失败计数与锁定状态
-- 重置后请立即登录后台修改为强密码
+- 使用 `--yes` 时会输出生成的随机密码，请妥善保存
 
 ---
 
@@ -622,7 +619,7 @@ amig/
 │   ├── templates/           # Jinja2 模板（前台 + 后台）
 │   └── static/              # 静态资源（CSS/JS）
 ├── uploads/                 # 上传图片存储（按年/月分目录）
-├── data/                    # 数据文件（app.db、ip2region.xdb）
+├── data/                    # 数据文件（app.db）
 ├── tests/                   # 单元测试（unittest）
 ├── .env.example             # 环境变量示例
 ├── requirements.txt         # Python 依赖
@@ -644,9 +641,6 @@ A：确认 Python 已安装并加入 PATH；确认 `requirements.txt` 存在；�
 
 **Q：提示端口 8000 被占用？**
 A：`start.bat` 会自动结束占用端口的旧进程。若仍失败，手动执行 `netstat -ano | findstr :8000` 找到 PID 后 `taskkill /F /PID <pid>`。
-
-**Q：提示 `ip2region.xdb not found`？**
-A：这是可选组件，缺失时 IP 归属地功能停用，不影响其他功能。下载后放入 `data/` 目录重启即可。
 
 **Q：启动后访问返回 502/504？**
 A：502 通常是 uvicorn 未启动，检查 `systemctl status amig.service` 与日志；504 是上游处理超时，确认已配置 `proxy_read_timeout 120s`，并确认代码已更新到含性能修复的版本。
@@ -679,19 +673,19 @@ A：触发了上传间隔限流或冷却机制，请稍后再试；多次被拒�
 **Q：点赞提示「您已经赞过这张图片了」？**
 A：同一 IP + 浏览器指纹对同一图片仅可点赞一次，属正常防刷机制。
 
-**Q：验证码数字不显示？**
-A：确认后台已开启「上传验证码」；若数字消失，刷新页面即可（每次渲染会重新生成）。
+**Q：人机验证未显示或校验失败？**
+A：确认后台已开启「人机验证」，并正确填写 Cloudflare Turnstile 的 Site Key 与 Secret Key；同时检查站点域名已加入 Turnstile 控制台配置，且服务器可访问 `challenges.cloudflare.com`。
 
 **Q：被拒绝的图片能恢复吗？**
 A：不能。「拒绝」等同于「删除」，图片文件与记录会彻底移除，操作前请谨慎确认。
 
 **Q：IP 归属地不显示？**
-A：确认 `data/ip2region.xdb` 存在（已随仓库内置），并重启服务即可。
+A：确认服务器可以访问 `ip-api.com`，并检查 `IP_API_TIMEOUT` 与 `IP_API_CACHE_TTL` 配置。私有地址、回环地址及查询失败不会显示归属地，也不会影响上传或点赞。
 
 ### 密码与账号类
 
 **Q：忘记管理员密码？**
-A：执行 `python reset_password.py` 重置为默认密码 `abcd1234`（详见上文「密码重置」）。
+A：执行 `python reset_password.py` 后交互式设置新密码；非交互环境可使用 `python reset_password.py --yes` 生成随机强密码（详见上文「密码重置」）。
 
 **Q：修改密码需要原密码吗？**
 A：不需要。登录状态下直接输入新密码 + 确认即可修改。
@@ -727,19 +721,9 @@ cd /www/wwwroot/amig && python3 -c "import sqlite3; c=sqlite3.connect('data/app.
 | `pages` | 自定义页面 |
 | `friend_links` | 友情链接 |
 | `daily_stats` | 每日统计（上传/通过/拒绝/点赞/浏览） |
-| `admin_logs` | 管理员操作日志（含 IP、地理位置） |
+| `admin_logs` | 管理员操作日志（含 IP） |
 | `sessions` | 管理员会话（持久化，支持多 worker 共享登录态） |
 | `view_sessions` | 浏览去重记录 |
 | `cooling` | 冷却机制（拒绝次数、冷却倍数） |
 
 > 数据库文件位于 `data/app.db`，使用 SQLite，可通过 `sqlite3 data/app.db` 或图形化工具（如 DB Browser for SQLite）查看。
-
----
-
-## 第三方软件
-
-本项目内置了 [ip2region](https://github.com/lionsoul2014/ip2region) 的离线 IP 数据库（`data/ip2region.xdb`、`data/ip2region_v6.xdb`）及其查询客户端（`app/xdbSearcher.py`）。
-
-- 版权：Copyright (c) 2015 Lionsoul <chenxin619315@gmail.com>
-- 许可证：Apache License 2.0 / MIT 双许可
-- 完整声明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)

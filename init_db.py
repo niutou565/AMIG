@@ -110,8 +110,6 @@ def main():
     print("\n" + "=" * 50)
     print("  初始化完成！")
     print("=" * 50)
-    print(f"\n  请确保 data/ip2region.xdb 文件已放置到项目 data 目录下")
-    print(f"  下载地址: https://github.com/lionsoul2014/ip2region")
     print(f"\n  启动命令: python run.py")
     print(f"  或: uvicorn app.main:app --host 127.0.0.1 --port 8000")
 

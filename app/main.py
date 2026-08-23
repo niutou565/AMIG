@@ -8,8 +8,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
 from app.config import UPLOADS_DIR, BASE_DIR, APP_VERSION
 from app.database import init_db, close_db
-from app.ip_geo import init_ip2region
-from app.middleware import AdminDomainMiddleware, CSRFMiddleware
+from app.middleware import AdminDomainMiddleware, CSRFMiddleware, SecurityHeadersMiddleware
 from app.routes import front, admin, api
 
 # Ensure directories exist
@@ -29,13 +28,14 @@ app = FastAPI(
 # Add middleware (last added = outermost wrapper)
 app.add_middleware(AdminDomainMiddleware)
 app.add_middleware(CSRFMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
 
 # Mount static files
 static_dir = BASE_DIR / "app" / "static"
 if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
-uploads_dir = BASE_DIR / "uploads"
+uploads_dir = Path(UPLOADS_DIR)
 if uploads_dir.exists():
     app.mount("/uploads", StaticFiles(directory=str(uploads_dir)), name="uploads")
 
@@ -66,7 +66,6 @@ app.include_router(api.router)
 @app.on_event("startup")
 async def startup():
     init_db()
-    init_ip2region()
     print("[INFO] Application started")
 
 

@@ -5,7 +5,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # 应用版本信息
 APP_NAME = "AMIG"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.5"
 
 # 从 .env 文件加载环境变量（必须在读取 os.getenv 之前执行，否则 ADMIN_DOMAIN 等不生效）
 _env_path = BASE_DIR / ".env"
@@ -24,8 +24,8 @@ if _env_path.exists():
 ADMIN_DOMAIN = os.getenv("ADMIN_DOMAIN", "")
 DATABASE_PATH = os.getenv("DATABASE_PATH", str(BASE_DIR / "data" / "app.db"))
 UPLOADS_DIR = os.getenv("UPLOADS_DIR", str(BASE_DIR / "uploads"))
-IP2REGION_PATH = os.getenv("IP2REGION_PATH", str(BASE_DIR / "data" / "ip2region.xdb"))
-IP2REGION_V6_PATH = os.getenv("IP2REGION_V6_PATH", str(BASE_DIR / "data" / "ip2region_v6.xdb"))
+IP_API_TIMEOUT = float(os.getenv("IP_API_TIMEOUT", "3"))
+IP_API_CACHE_TTL = int(os.getenv("IP_API_CACHE_TTL", "300"))
 
 # 可信反向代理地址（仅当请求来自这些地址时，才信任 X-Real-IP 等代理头）
 # 默认仅信任本机回环，防止客户端伪造请求头绕过限流/封禁。
@@ -34,6 +34,13 @@ TRUSTED_PROXIES = {
     for p in os.getenv("TRUSTED_PROXIES", "127.0.0.1,::1,localhost").split(",")
     if p.strip()
 }
+
+# Cookie Secure 标志：HTTPS 部署下必须为 True，防止 Cookie 经 HTTP 明文传输
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "true").strip().lower() in ("1", "true", "yes", "on")
+
+# HSTS（HTTP 严格传输安全）
+HSTS_MAX_AGE = int(os.getenv("HSTS_MAX_AGE", "31536000"))
+HSTS_INCLUDE_SUBDOMAINS = os.getenv("HSTS_INCLUDE_SUBDOMAINS", "true").strip().lower() in ("1", "true", "yes", "on")
 
 # 图片限制
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB

@@ -52,13 +52,12 @@
         </div>
         {% endif %}
 
-        {% if enable_captcha %}
+        {% if enable_captcha and turnstile_site_key %}
         <div class="form-group">
-            <label>验证码：{{ captcha_a }} + {{ captcha_b }} = ?</label>
-            <input type="number" name="captcha_answer" required>
-            <input type="hidden" name="captcha_a" value="{{ captcha_a }}">
-            <input type="hidden" name="captcha_b" value="{{ captcha_b }}">
+            <label>人机验证</label>
+            <div class="cf-turnstile" data-sitekey="{{ turnstile_site_key }}" data-theme="auto"></div>
         </div>
+        <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
         {% endif %}
 
         <div class="form-group checkbox-group">
@@ -134,7 +133,14 @@
         reader.readAsDataURL(file);
     }
 
-    form.addEventListener('submit', function() {
+    form.addEventListener('submit', function(e) {
+        // 若启用了人机验证，确保已完成验证
+        var turnstileInput = document.querySelector('input[name="cf-turnstile-response"]');
+        if (document.querySelector('.cf-turnstile') && (!turnstileInput || !turnstileInput.value)) {
+            e.preventDefault();
+            alert('请先完成人机验证');
+            return;
+        }
         submitBtn.disabled = true;
         submitBtn.textContent = '上传中...';
     });

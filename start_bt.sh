@@ -36,7 +36,7 @@ echo "[*] Upgrading pip..."
 python3 -m pip install --upgrade pip >/dev/null 2>&1 || true
 
 echo "[*] Checking dependencies..."
-if ! python3 -c "import fastapi, PIL, bcrypt, jinja2" >/dev/null 2>&1; then
+if ! python3 -c "import fastapi, uvicorn, multipart, PIL, bcrypt, aiofiles, jinja2, httpx" >/dev/null 2>&1; then
     echo "[*] Installing dependencies (system python3)..."
     # Debian/Ubuntu PEP 668 限制时需 --break-system-packages
     python3 -m pip install --break-system-packages -r "$SCRIPT_DIR/requirements.txt" 2>/dev/null \
@@ -49,17 +49,7 @@ if ! python3 -c "import fastapi, PIL, bcrypt, jinja2" >/dev/null 2>&1; then
 fi
 echo "[OK] Dependencies ready"
 
-# ========== Step 3: 检查 ip2region.xdb ==========
-echo ""
-echo "[*] Checking ip2region offline database..."
-if [ ! -f "$SCRIPT_DIR/data/ip2region.xdb" ]; then
-    echo "[WARN] data/ip2region.xdb not found, IP geo-location will be disabled"
-    echo "       Download: https://github.com/lionsoul2014/ip2region/releases"
-else
-    echo "[OK] ip2region.xdb ready"
-fi
-
-# ========== Step 4: 检查 .env ==========
+# ========== Step 3: 检查 .env ==========
 echo ""
 echo "[*] Checking .env configuration..."
 if [ ! -f "$SCRIPT_DIR/.env" ]; then

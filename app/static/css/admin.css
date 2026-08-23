@@ -242,4 +242,21 @@ mark.hl { background: var(--warning); color: #1a1a1a; border-radius: 2px; paddin
     .admin-main { padding: 1rem; }
     .stats-grid { grid-template-columns: repeat(3, 1fr); }
     .review-detail { flex-direction: column; }
+
+    /* 防止 iOS Safari 聚焦输入框时自动放大页面（字号需 ≥16px） */
+    input[type="text"], input[type="number"], input[type="password"],
+    input[type="email"], input[type="search"], input[type="url"],
+    input[type="tel"], input[type="date"], select, textarea {
+        font-size: 16px;
+    }
+    /* 移动端增大可点击区域（最小约 44px） */
+    .btn-sm, .page-link, .filter-btn, .chart-tab {
+        min-height: 44px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+    }
+    .sidebar-nav a { min-height: 44px; display: flex; align-items: center; }
+    /* 数据表格横向滚动，避免窄屏下多列被压缩错乱 */
+    .data-table { min-width: 640px; }
 }

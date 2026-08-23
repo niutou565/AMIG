@@ -9,7 +9,7 @@
     <link rel="stylesheet" href="/static/css/dark.css?v=2">
     <style>
         :root {
-            --accent: {{ accent_color }};
+            --accent: {{ accent_color | safe_color }};
         }
     </style>
     {% block head %}{% endblock %}

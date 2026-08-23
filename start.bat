@@ -50,7 +50,7 @@ if not exist "%SCRIPT_DIR%requirements.txt" (
     exit /b 1
 )
 
-python -c "import fastapi, PIL, bcrypt, jinja2" >nul 2>&1
+python -c "import fastapi, uvicorn, multipart, PIL, bcrypt, aiofiles, jinja2, httpx" >nul 2>&1
 if %errorlevel% neq 0 (
     echo [WARN] Dependencies not installed or incomplete, installing now...
     echo        (Using prebuilt wheels, this may take a moment...)
@@ -76,19 +76,7 @@ if %errorlevel% neq 0 (
     echo [OK] Core dependencies ready
 )
 
-:: ========== Step 4: Check ip2region.xdb ==========
-echo.
-echo [*] Checking ip2region offline database...
-if not exist "%SCRIPT_DIR%data\ip2region.xdb" (
-    echo [WARN] data\ip2region.xdb not found, IP geo-location will be disabled
-    echo         Download: https://github.com/lionsoul2014/ip2region/releases
-    echo         Place ip2region.xdb into the data\ folder and restart
-    echo [OK] Continuing without ip2region.xdb
-) else (
-    echo [OK] ip2region.xdb ready
-)
-
-:: ========== Step 5: Check .env Config ==========
+:: ========== Step 4: Check .env Config ==========
 echo.
 echo [*] Checking .env configuration...
 if not exist "%SCRIPT_DIR%.env" (

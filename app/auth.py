@@ -1,6 +1,8 @@
 """后台认证与 Session 管理"""
 import hashlib
 import secrets
+import threading
+import time
 from datetime import datetime, timezone, timedelta
 from app.models import get_admin_by_username, update_admin_login_attempts, get_admin_by_id, now_iso
 from app.database import get_db
@@ -8,6 +10,29 @@ from app.config import LOGIN_MAX_ATTEMPTS, LOGIN_LOCK_MINUTES
 
 # 会话有效期（小时）
 SESSION_TTL_HOURS = 24
+
+# 登录 IP 级限流：同一 IP 在窗口内尝试次数受限，低于账户锁定阈值，
+# 防止攻击者反复错误密码将管理员账户锁定（可用性 DoS）。
+_LOGIN_IP_MAX_ATTEMPTS = 3
+_LOGIN_IP_WINDOW_SECONDS = 900  # 15 分钟
+_login_ip_lock = threading.Lock()
+_login_ip_attempts = {}  # ip -> [count, window_start]
+
+
+def check_login_ip_limit(ip: str) -> bool:
+    """返回是否允许该 IP 继续尝试登录。多 worker 下各自独立计数，作为缓解已足够。"""
+    if not ip:
+        return True
+    now = time.time()
+    with _login_ip_lock:
+        entry = _login_ip_attempts.get(ip)
+        if entry and now - entry[1] < _LOGIN_IP_WINDOW_SECONDS:
+            if entry[0] >= _LOGIN_IP_MAX_ATTEMPTS:
+                return False
+            entry[0] += 1
+        else:
+            _login_ip_attempts[ip] = [1, now]
+        return True
 
 
 def hash_password(password: str) -> str:

@@ -1,8 +1,9 @@
 """Middleware: Host validation, admin domain control, CSRF protection"""
+import ipaddress
+import secrets
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
-from app.config import ADMIN_DOMAIN
-import secrets
+from app.config import ADMIN_DOMAIN, COOKIE_SECURE, HSTS_MAX_AGE, HSTS_INCLUDE_SUBDOMAINS
 
 
 # ========== Admin domain checks ==========
@@ -21,9 +22,19 @@ def get_admin_domains():
     return all_domains
 
 
+def _is_loopback_host(host: str) -> bool:
+    """精确判定回环地址，避免 `127.` 前缀误放行（如 127.evil.com）。"""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def is_admin_access(request) -> bool:
     host = request.headers.get("host", "").lower().split(":")[0]
-    if host in ("127.0.0.1", "localhost") or host.startswith("127."):
+    if _is_loopback_host(host):
         return True
     domains = get_admin_domains()
     if not domains:
@@ -55,13 +66,18 @@ def get_or_create_csrf_token(request) -> str:
     return generate_csrf_token()
 
 
-def set_csrf_cookie(response: Response, token: str):
+def _secure_cookie_for_request(request) -> bool:
+    host = request.headers.get("host", "").lower().split(":")[0]
+    return COOKIE_SECURE and not _is_loopback_host(host)
+
+
+def set_csrf_cookie(response: Response, token: str, request):
     response.set_cookie(
         key="csrf_token",
         value=token,
         httponly=True,
         samesite="lax",
-        secure=False,
+        secure=_secure_cookie_for_request(request),
         max_age=86400,
         path="/",
     )
@@ -88,7 +104,7 @@ class CSRFMiddleware(BaseHTTPMiddleware):
 
         # Set cookie if it didn't exist or if we generated a new one
         if not existing:
-            set_csrf_cookie(response, request.state.csrf_token)
+            set_csrf_cookie(response, request.state.csrf_token, request)
         return response
 
 
@@ -114,3 +130,30 @@ def check_sensitive(text: str) -> bool:
         if word in text:
             return True
     return False
+
+
+# ========== 安全响应头 ==========
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """为所有响应添加安全响应头（纵深防御，建议同时在 Nginx/Cloudflare 层配置）。
+
+    使用 setdefault 避免覆盖反向代理已注入的头；若上游未设置，则使用此处的安全默认值。
+    """
+
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com; "
+            "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+            "frame-src https://challenges.cloudflare.com; frame-ancestors 'self'; "
+            "object-src 'none'; base-uri 'self'",
+        )
+        hsts = f"max-age={HSTS_MAX_AGE}"
+        if HSTS_INCLUDE_SUBDOMAINS:
+            hsts += "; includeSubDomains"
+        response.headers.setdefault("Strict-Transport-Security", hsts)
+        return response

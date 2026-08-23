@@ -3,12 +3,11 @@
 """
 管理员密码重置脚本（适用于宝塔面板 / 命令行）
 
-功能：将后台管理员（用户名 admin）的密码重置为默认密码 abcd1234。
-     同时清除登录失败计数与锁定状态，保证可立即登录。
+功能：重置后台管理员（用户名 admin）的密码，并清除登录失败计数与锁定状态。
 
 用法：
-    python reset_password.py                # 交互式确认后重置为 abcd1234
-    python reset_password.py --yes          # 跳过确认，直接重置
+    python reset_password.py                # 交互式输入并确认新密码
+    python reset_password.py --yes          # 生成随机强密码并直接重置
     python reset_password.py --password 自定义密码 [--yes]
 
 安全说明：
@@ -19,11 +18,12 @@
 
 import os
 import sys
+import secrets
 import sqlite3
 import getpass
 
-DEFAULT_PASSWORD = "abcd1234"
 DEFAULT_USERNAME = "admin"
+MIN_PASSWORD_LENGTH = 8
 
 # 数据库路径：优先使用环境变量 DATABASE_PATH，否则相对脚本目录 data/app.db
 def resolve_db_path():
@@ -63,7 +63,7 @@ def confirm_reset(username: str, password: str, skip: bool) -> bool:
 def main():
     args = sys.argv[1:]
     skip = "--yes" in args
-    password = DEFAULT_PASSWORD
+    password = None
 
     # 解析 --password 参数
     for i, a in enumerate(args):
@@ -72,8 +72,24 @@ def main():
         elif a.startswith("--password="):
             password = a.split("=", 1)[1]
 
-    if len(password) < 6:
-        print("[失败] 新密码长度不能少于 6 位")
+    # 未显式指定密码时：交互式输入；非交互场景随机生成强密码，绝不使用固定弱密码
+    if not password:
+        if skip:
+            password = secrets.token_hex(12)
+        else:
+            try:
+                p1 = getpass.getpass(f"请输入新密码（至少 {MIN_PASSWORD_LENGTH} 位）: ")
+                p2 = getpass.getpass("请再次输入确认: ")
+            except EOFError:
+                print("[失败] 非交互环境下请通过 --password 或 --yes 指定密码")
+                sys.exit(1)
+            if p1 != p2:
+                print("[失败] 两次输入不一致")
+                sys.exit(1)
+            password = p1
+
+    if len(password) < MIN_PASSWORD_LENGTH:
+        print(f"[失败] 新密码长度不能少于 {MIN_PASSWORD_LENGTH} 位")
         sys.exit(1)
 
     db_path = resolve_db_path()

@@ -4,7 +4,7 @@ from fastapi import APIRouter, Request, Form, File, UploadFile, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from markupsafe import escape, Markup
-from app.config import BASE_DIR, ADMIN_PER_PAGE, LIKES_PER_PAGE, MAX_DESC_LENGTH, MAX_TITLE_LENGTH, UPLOADS_DIR, APP_NAME, APP_VERSION
+from app.config import BASE_DIR, ADMIN_PER_PAGE, LIKES_PER_PAGE, MAX_DESC_LENGTH, MAX_TITLE_LENGTH, UPLOADS_DIR, APP_NAME, APP_VERSION, MAX_UPLOAD_SIZE
 from app.models import (
     get_images_by_status, count_images_by_status, get_image_by_id,
     update_image_status, update_image_content, delete_image, get_all_links, get_link_by_id,
@@ -21,10 +21,11 @@ from app.models import (
     ensure_daily_stats, count_images_admin,
 )
 from app.stats import get_dashboard_data, invalidate_top_cache
-from app.auth import login, get_current_admin, hash_password, destroy_session
+from app.auth import login, get_current_admin, hash_password, destroy_session, check_login_ip_limit
 from app.middleware import validate_csrf, load_sensitive_words
 from app.image_utils import delete_image_files
-from app.ip_geo import get_ip_location
+from app.ip_geo import get_client_ip
+from app.display import safe_color
 import os
 import json
 
@@ -52,23 +53,27 @@ def highlight(text, keyword):
 templates.env.filters["highlight"] = highlight
 templates.env.globals["app_name"] = APP_NAME
 templates.env.globals["app_version"] = APP_VERSION
+templates.env.filters["safe_color"] = safe_color
 
-# Logo 允许的扩展名
-ALLOWED_LOGO_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".ico", ".svg"}
+# Logo 允许的扩展名（不含 .svg，避免上传可嵌入脚本的矢量图造成存储型 XSS）
+ALLOWED_LOGO_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".ico"}
 
 
 async def _save_logo(upload_file, prefix):
-    """保存上传的 Logo 到 UPLOADS_DIR，返回文件名；非法扩展名或空文件返回 None"""
+    """保存上传的 Logo 到 UPLOADS_DIR，返回文件名；非法扩展名、空文件或超大文件返回 None"""
     if not (hasattr(upload_file, "filename") and upload_file.filename):
         return None
     import uuid
     ext = os.path.splitext(upload_file.filename)[1].lower()
     if ext not in ALLOWED_LOGO_EXTS:
         return None
+    data = await upload_file.read()
+    if not data or len(data) > MAX_UPLOAD_SIZE:
+        return None
     logo_name = f"{prefix}_{uuid.uuid4().hex}{ext}"
     os.makedirs(UPLOADS_DIR, exist_ok=True)
     with open(os.path.join(UPLOADS_DIR, logo_name), "wb") as f:
-        f.write(await upload_file.read())
+        f.write(data)
     return logo_name
 
 
@@ -114,6 +119,12 @@ async def login_action(
             "error": "请求无效，请刷新页面重试", "csrf_token": getattr(request.state, "csrf_token", "")
         })
 
+    # IP 级登录限流，防止攻击者反复错误密码锁定管理员账户
+    if not check_login_ip_limit(get_client_ip(request)):
+        return templates.TemplateResponse(request, "admin/login.html", {
+            "error": "尝试次数过多，请稍后再试", "csrf_token": getattr(request.state, "csrf_token", "")
+        })
+
     success, result, admin_obj = login(username, password)
     if not success:
         return templates.TemplateResponse(request, "admin/login.html", {
@@ -126,6 +137,7 @@ async def login_action(
         value=result,
         httponly=True,
         samesite="lax",
+        secure=_secure_cookie_for_request(request),
         max_age=86400,
     )
     set_current_admin_request(request)
@@ -502,6 +514,7 @@ async def admin_settings_save(request: Request, csrf_token: str = Form("")):
         "upload_limit_daily_total", "upload_interval_seconds",
         "like_limit_per_minute", "top_window_days", "top_show_count",
         "allow_author", "enable_captcha", "enable_dedup", "sensitive_words",
+        "turnstile_site_key",
     ]
 
     # 保存旧管理域名
@@ -512,6 +525,11 @@ async def admin_settings_save(request: Request, csrf_token: str = Form("")):
         if key in ("allow_author", "enable_captcha", "enable_dedup"):
             val = "1" if val == "on" else "0"
         set_setting(key, val)
+
+    # Turnstile 密钥：留空表示不修改（避免保存时误清空已配置的密钥）
+    turnstile_secret = form.get("turnstile_secret_key", "").strip()
+    if turnstile_secret:
+        set_setting("turnstile_secret_key", turnstile_secret)
 
     # 管理域名特殊处理
     new_admin_domain = form.get("admin_domain", "")

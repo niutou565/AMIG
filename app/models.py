@@ -5,17 +5,14 @@ import contextvars
 from datetime import datetime, timezone, timedelta
 from app.database import get_db
 
-# 当前请求的管理员 IP 与地理位置（由 admin 路由设置，供日志记录使用）
+# 当前请求的管理员 IP（由 admin 路由设置，供日志记录使用）
 _current_admin_ip = contextvars.ContextVar("current_admin_ip", default="")
-_current_admin_location = contextvars.ContextVar("current_admin_location", default="")
 
 
 def set_current_admin_request(request):
-    """在后台请求上下文中记录当前管理员 IP 与地理位置。"""
-    from app.ip_geo import get_client_ip, get_ip_geo_label
-    ip = get_client_ip(request)
-    _current_admin_ip.set(ip)
-    _current_admin_location.set(get_ip_geo_label(ip))
+    """在后台请求上下文中记录当前管理员 IP。"""
+    from app.ip_geo import get_client_ip
+    _current_admin_ip.set(get_client_ip(request))
 
 
 def now_iso():
@@ -633,7 +630,7 @@ def insert_admin_log(admin_id, admin_name, action, detail="", target="", ip=None
     if ip is None:
         ip = _current_admin_ip.get()
     if location is None:
-        location = _current_admin_location.get()
+        location = ""
     db.execute(
         "INSERT INTO admin_logs (admin_id, admin_name, action, detail, target, ip, location, created_at) VALUES (?,?,?,?,?,?,?,?)",
         (admin_id, admin_name, action, detail, target, ip, location, now_iso())

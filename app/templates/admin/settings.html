@@ -100,8 +100,21 @@
     </div>
     <div class="form-group checkbox-group">
         <label><input type="checkbox" name="allow_author" {% if settings.get('allow_author', '1') == '1' %}checked{% endif %}> 允许署名</label>
-        <label><input type="checkbox" name="enable_captcha" {% if settings.get('enable_captcha', '0') == '1' %}checked{% endif %}> 开启上传验证码</label>
         <label><input type="checkbox" name="enable_dedup" {% if settings.get('enable_dedup', '1') == '1' %}checked{% endif %}> 开启图片去重</label>
+    </div>
+
+    <h4>人机验证（Cloudflare Turnstile）</h4>
+    <div class="form-group checkbox-group">
+        <label><input type="checkbox" name="enable_captcha" {% if settings.get('enable_captcha', '0') == '1' %}checked{% endif %}> 开启人机验证</label>
+    </div>
+    <div class="form-group">
+        <label>Site Key（站点密钥）</label>
+        <input type="text" name="turnstile_site_key" value="{{ settings.get('turnstile_site_key', '') }}" placeholder="0x4AAAAAA...">
+    </div>
+    <div class="form-group">
+        <label>Secret Key（服务端密钥）</label>
+        <input type="password" name="turnstile_secret_key" value="" autocomplete="new-password" placeholder="{% if settings.get('turnstile_secret_key') %}已配置，留空保持不变{% else %}请输入 Secret Key{% endif %}">
+        <p class="form-hint">Secret Key 在 Cloudflare Turnstile 后台获取；出于安全不回显，留空保存不会清除已配置的密钥。</p>
     </div>
 
     <button type="submit" class="btn btn-primary" onclick="return confirm('确定保存设置？')">保存设置</button>

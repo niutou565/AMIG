@@ -1,4 +1,15 @@
 """展示层格式化工具，供 Jinja 模板使用。"""
+import re
+
+_SAFE_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{3,8}$")
+
+
+def safe_color(value, default="#6c5ce7"):
+    """清洗主题色，仅接受合法的十六进制颜色，防止 CSS/HTML 注入。"""
+    v = str(value).strip() if value else ""
+    if _SAFE_COLOR_RE.match(v):
+        return v
+    return default
 
 
 def uploader_label(row):

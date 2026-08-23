@@ -23,13 +23,15 @@ from app.limiter import check_upload_limit
 from app.ban import check_ban_status
 from app.image_utils import validate_image, process_image
 from app.middleware import check_sensitive
-from app.display import uploader_label
+from app.display import uploader_label, safe_color
 import os
 import threading
+import httpx
 
 router = APIRouter()
 templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
 templates.env.filters["uploader_label"] = uploader_label
+templates.env.filters["safe_color"] = safe_color
 
 # 限制并发图片处理数量，避免大量并发上传耗尽线程池与 CPU
 _upload_semaphore = threading.Semaphore(4)
@@ -54,6 +56,7 @@ def get_settings_context():
         "accent_color": settings.get("theme_accent_color", "#6c5ce7"),
         "allow_author": settings.get("allow_author", "1") == "1",
         "enable_captcha": settings.get("enable_captcha", "0") == "1",
+        "turnstile_site_key": settings.get("turnstile_site_key", ""),
     }
 
 
@@ -65,6 +68,27 @@ def get_common_context(request: Request):
     # CSRF token (set by CSRFMiddleware, always available via request.state)
     ctx["csrf_token"] = getattr(request.state, "csrf_token", "")
     return ctx
+
+
+async def verify_turnstile(token: str, ip: str) -> bool:
+    """服务端校验 Cloudflare Turnstile token，返回是否通过。
+
+    始终在后端调用 siteverify，前端 token 仅作为一次性的凭据。
+    校验成功与否只依据 Cloudflare 返回的 success 字段。
+    """
+    secret = get_setting("turnstile_secret_key", "")
+    if not secret or not token:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+                data={"secret": secret, "response": token, "remoteip": ip},
+            )
+            result = resp.json()
+    except Exception:
+        return False
+    return bool(result.get("success"))
 
 
 # ========== 首页 ==========
@@ -157,13 +181,10 @@ async def image_detail(request: Request, image_id: int):
 # ========== 上传页 ==========
 
 def _prepare_upload_context(request: Request):
-    """构建上传页上下文（含验证码数字，每次渲染重新生成）"""
+    """构建上传页上下文（含 Turnstile 站点密钥）"""
     ctx = get_common_context(request)
     ctx["enable_captcha"] = get_setting("enable_captcha", "0") == "1"
-    if ctx["enable_captcha"]:
-        import random
-        ctx["captcha_a"] = random.randint(1, 20)
-        ctx["captcha_b"] = random.randint(1, 20)
+    ctx["turnstile_site_key"] = get_setting("turnstile_site_key", "")
     return ctx
 
 
@@ -183,9 +204,7 @@ async def upload_action(
     agree: str = Form(""),
     honeypot: str = Form(""),  # 蜜罐字段
     csrf_token: str = Form(""),
-    captcha_answer: str = Form(""),
-    captcha_a: str = Form(""),
-    captcha_b: str = Form(""),
+    turnstile_response: str = Form("", alias="cf-turnstile-response"),
 ):
     ctx = _prepare_upload_context(request)
 
@@ -202,14 +221,14 @@ async def upload_action(
     if agree != "1":
         return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "请先阅读并同意站规"})
 
-    # 验证码
+    # 人机验证（Cloudflare Turnstile）
+    ip = get_client_ip(request)
     if get_setting("enable_captcha", "0") == "1":
-        try:
-            expected = int(captcha_a) + int(captcha_b)
-            if str(captcha_answer).strip() != str(expected):
-                return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "验证码错误"})
-        except (ValueError, TypeError):
-            return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "验证码错误"})
+        token = turnstile_response.strip()
+        if not token:
+            return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "请完成人机验证"})
+        if not await verify_turnstile(token, ip):
+            return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "人机验证失败，请重试"})
 
     # 输入校验
     title = title.strip()[:MAX_TITLE_LENGTH]
@@ -225,7 +244,6 @@ async def upload_action(
     if check_sensitive(title) or check_sensitive(description) or (author and check_sensitive(author)):
         return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "内容包含敏感词，请修改后重试"})
 
-    ip = get_client_ip(request)
     ua_val = request.headers.get("user-agent", "")
     ua_hash_val = ua_hash(ua_val)
 
@@ -287,8 +305,8 @@ async def upload_action(
             })
 
     # 存库
-    province, city = get_ip_location(ip)
-    region = get_ip_region(ip)
+    province, city = await run_in_threadpool(get_ip_location, ip)
+    region = await run_in_threadpool(get_ip_region, ip)
     from app.models import insert_image
     img_id = insert_image(
         result["filename"], result["thumb_filename"],
@@ -322,7 +340,8 @@ async def custom_page(request: Request, slug: str):
 
 @router.get("/robots.txt")
 async def robots():
+    # 不写入 Disallow: /admin 等敏感路径，避免反向暴露后台入口给扫描器
     return Response(
-        "User-agent: *\nAllow: /\nDisallow: /admin\n",
+        "User-agent: *\nAllow: /\n",
         media_type="text/plain"
     )
