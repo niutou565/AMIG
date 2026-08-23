@@ -31,6 +31,7 @@ import httpx
 
 router = APIRouter()
 templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
+templates.env.filters["location_label"] = location_label
 templates.env.filters["uploader_label"] = uploader_label
 templates.env.filters["safe_color"] = safe_color
 
