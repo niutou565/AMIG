@@ -9,6 +9,7 @@ from fastapi.templating import Jinja2Templates
 from app.config import UPLOADS_DIR, BASE_DIR, APP_VERSION
 from app.database import init_db, close_db
 from app.middleware import AdminDomainMiddleware, CSRFMiddleware, SecurityHeadersMiddleware
+from app.display import safe_color
 from app.routes import front, admin, api
 
 # Ensure directories exist
@@ -17,6 +18,7 @@ os.makedirs(BASE_DIR / "data", exist_ok=True)
 
 # Initialize templates at module level
 templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
+templates.env.filters["safe_color"] = safe_color
 
 app = FastAPI(
     title="Anonymous Image Sharing",
