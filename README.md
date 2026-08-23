@@ -335,6 +335,55 @@ TRUSTED_PROXIES=127.0.0.1,::1,localhost
 
 上传和点赞会通过 `ip-api.com` 查询公网 IP 的归属地。查询结果默认缓存 300 秒；网络不可用、私有地址或查询失败时会保留为空，不影响上传和点赞。
 
+#### Cloudflare 代理下地区显示“未知地区”
+
+**现象与影响**：Cloudflare DNS 记录开启“已代理”（橙色云朵）后，用户仍可正常上传和点赞，但新记录的地区可能显示为“未知地区”。这会影响上传者和点赞者地区识别；历史空地区数据不会自动回填。浏览器中第三方统计脚本、Google reCAPTCHA 或 Cloudflare Analytics 的网络错误与该后端问题无直接关系。
+
+**原因**：Cloudflare 会将真实用户 IP 放在 `CF-Connecting-IP` 请求头中；源站默认收到的是 Cloudflare 节点 IP。Nginx 未仅对 Cloudflare 官方出口网段解析该请求头，或应用未信任 Nginx 反代来源时，`ip-api.com` 收到代理/内网 IP，无法返回地区。
+
+**处理方法**：保留 Cloudflare 橙色云朵，不要关闭 CDN。在宝塔站点 Nginx 的 `server` 块中引入由 Cloudflare 官方 IP 段生成的真实 IP 配置，并继续传递 `$remote_addr`：
+
+```nginx
+include /www/server/nginx/conf/cloudflare-realip.conf;
+
+location / {
+    proxy_pass http://127.0.0.1:8000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+生成 `/www/server/nginx/conf/cloudflare-realip.conf`：
+
+```bash
+{
+  curl -fsSL https://www.cloudflare.com/ips-v4 | sed 's#^#set_real_ip_from #; s#$#;#'
+  curl -fsSL https://www.cloudflare.com/ips-v6 | sed 's#^#set_real_ip_from #; s#$#;#'
+  printf '%s\n' 'real_ip_header CF-Connecting-IP;' 'real_ip_recursive on;'
+} | tee /www/server/nginx/conf/cloudflare-realip.conf
+```
+
+在 `/www/server/python_project/vhost/env/91bus.env` 中保留或配置实际 Nginx 到应用的可信代理来源：
+
+```ini
+TRUSTED_PROXIES=127.0.0.1,::1,localhost
+```
+
+若项目经 Docker/内部网桥转发，确认实际来源后再加入对应网段，例如 `172.16.0.0/12`。不要在 Python 代码中无条件信任 `CF-Connecting-IP`，否则绕过 Cloudflare 直连源站的请求可伪造 IP。
+
+执行并验证：
+
+```bash
+nginx -t
+systemctl reload nginx
+```
+
+随后重启宝塔中的 `91bus` Python 项目。使用移动网络或另一公网网络新增一次点赞，确认新记录显示地区且应用收到的 `X-Real-IP` 是真实公网 IP。
+
+参考：<https://developers.cloudflare.com/support/troubleshooting/restoring-visitor-ips/>、<https://www.cloudflare.com/ips/>。
+
 ### 6. 初始化数据库
 
 ```bash

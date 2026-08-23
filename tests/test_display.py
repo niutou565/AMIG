@@ -1,10 +1,17 @@
 """上传者展示文案格式化单元测试"""
 import unittest
 
-from app.display import uploader_label
+from app.display import location_label, uploader_label
 
 
 class TestUploaderLabel(unittest.TestCase):
+    def test_legacy_english_location_is_translated(self):
+        self.assertEqual(location_label("Guangxi", "Gangkou"), "广西港口区")
+        self.assertEqual(
+            uploader_label(self._row("Guangxi", "Gangkou", "", "cn")),
+            "广西港口区的匿名用户",
+        )
+
     def _row(self, province="", city="", author="", region=""):
         return {
             "province": province,

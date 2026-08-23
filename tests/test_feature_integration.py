@@ -84,6 +84,8 @@ class FeatureIntegrationTest(unittest.TestCase):
                 self.assertEqual(ip_geo.get_ip_location("8.8.8.8"), ("Beijing", "Beijing"))
                 self.assertEqual(ip_geo.get_ip_region("8.8.8.8"), "cn")
             urlopen.assert_called_once()
+            request = urlopen.call_args.args[0]
+            self.assertIn("lang=zh-CN", request.full_url)
             self.assertEqual(urlopen.call_args.kwargs["timeout"], 1.25)
         self.assertEqual(ip_geo.get_ip_location("127.0.0.1"), ("", ""))
 

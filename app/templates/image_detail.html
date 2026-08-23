@@ -35,7 +35,7 @@
         <h3>点赞列表</h3>
         {% for like in likes %}
         <div class="like-item">
-            <span class="like-user">来自{% if like.province %}{{ like.province }}{{ like.city }}{% else %}未知地区{% endif %}的用户</span>
+            <span class="like-user">来自{{ like.province | location_label(like.city) }}的用户</span>
             <span class="like-time">赞了这张图</span>
         </div>
         {% endfor %}

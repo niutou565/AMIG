@@ -23,7 +23,7 @@ from app.limiter import check_upload_limit
 from app.ban import check_ban_status
 from app.image_utils import validate_image, process_image
 from app.middleware import check_sensitive
-from app.display import uploader_label, safe_color
+from app.display import location_label, uploader_label, safe_color
 import logging
 import os
 import threading

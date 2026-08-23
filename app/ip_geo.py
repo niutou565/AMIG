@@ -36,7 +36,10 @@ def _lookup(ip: str):
 
     try:
         encoded_ip = urllib.parse.quote(ip, safe="")
-        url = f"{_IP_API_URL.format(encoded_ip)}?fields=status,country,regionName,city"
+        url = (
+            f"{_IP_API_URL.format(encoded_ip)}?"
+            "fields=status,country,regionName,city&lang=zh-CN"
+        )
         request = urllib.request.Request(
             url,
             headers={"User-Agent": "AMIG-IP-Geo/1.0"},

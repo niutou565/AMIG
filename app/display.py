@@ -3,6 +3,23 @@ import re
 
 _SAFE_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{3,8}$")
 
+# 兼容切换 ip-api 中文响应前已保存的英文地区数据。
+_LEGACY_LOCATION_NAMES = {
+    "Guangxi": "广西",
+    "Gangkou": "港口区",
+}
+
+
+def location_label(province, city):
+    """格式化 IP 地区，兼容历史英文地区值。"""
+    province = _LEGACY_LOCATION_NAMES.get(
+        (province or "").strip(), (province or "").strip()
+    )
+    city = _LEGACY_LOCATION_NAMES.get(
+        (city or "").strip(), (city or "").strip()
+    )
+    return f"{province}{city}" if province or city else "未知地区"
+
 
 def safe_color(value, default="#6c5ce7"):
     """清洗主题色，仅接受合法的十六进制颜色，防止 CSS/HTML 注入。"""
@@ -27,7 +44,7 @@ def uploader_label(row):
     region = (row["region"] or "").strip() if "region" in row.keys() else ""
 
     if province or city:
-        place = f"{province}{city}"
+        place = location_label(province, city)
     elif region == "overseas":
         place = "海外地区"
     else:
