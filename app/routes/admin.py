@@ -21,8 +21,9 @@ from app.models import (
     ensure_daily_stats, count_images_admin,
 )
 from app.stats import get_dashboard_data, invalidate_top_cache
-from app.auth import login, get_current_admin, hash_password, destroy_session, check_login_ip_limit
+from app.auth import login, get_current_admin, hash_password, destroy_session, check_login_ip_limit, rotate_session
 from app.middleware import validate_csrf, load_sensitive_words, _secure_cookie_for_request
+from app.admin_domains import get_request_host, is_loopback_host, normalize_admin_domains
 from app.image_utils import delete_image_files
 from app.ip_geo import get_client_ip
 from app.display import safe_color
@@ -60,21 +61,54 @@ ALLOWED_LOGO_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".ico"}
 
 
 async def _save_logo(upload_file, prefix):
-    """保存上传的 Logo 到 UPLOADS_DIR，返回文件名；非法扩展名、空文件或超大文件返回 None"""
+    """保存上传的 Logo 到 UPLOADS_DIR，返回文件名；非法扩展名、空文件或超大文件返回 None。
+
+    采用分块读取：累计大小一超过限制立即终止，避免先把整个文件读入内存。
+    """
     if not (hasattr(upload_file, "filename") and upload_file.filename):
         return None
     import uuid
     ext = os.path.splitext(upload_file.filename)[1].lower()
     if ext not in ALLOWED_LOGO_EXTS:
         return None
-    data = await upload_file.read()
-    if not data or len(data) > MAX_UPLOAD_SIZE:
-        return None
     logo_name = f"{prefix}_{uuid.uuid4().hex}{ext}"
     os.makedirs(UPLOADS_DIR, exist_ok=True)
-    with open(os.path.join(UPLOADS_DIR, logo_name), "wb") as f:
-        f.write(data)
-    return logo_name
+    final_path = os.path.join(UPLOADS_DIR, logo_name)
+    tmp_path = final_path + ".tmp"
+    total = 0
+    try:
+        with open(tmp_path, "wb") as f:
+            while True:
+                chunk = await upload_file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_UPLOAD_SIZE:
+                    raise ValueError("logo too large")
+                f.write(chunk)
+        if total == 0:
+            raise ValueError("logo is empty")
+        os.replace(tmp_path, final_path)
+        return logo_name
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        return None
+
+
+def _set_admin_session_cookie(response, session_id, request):
+    """为当前设备写入管理员会话 Cookie。"""
+    response.set_cookie(
+        key="admin_session",
+        value=session_id,
+        httponly=True,
+        samesite="lax",
+        secure=_secure_cookie_for_request(request),
+        max_age=86400,
+    )
 
 
 def admin_required(request: Request):
@@ -83,6 +117,16 @@ def admin_required(request: Request):
     if admin:
         set_current_admin_request(request)
     return admin
+
+
+def _delete_image_and_files(image):
+    """先删除数据库记录，成功后再删除文件。
+
+    数据库操作失败时文件保持不变；数据库删除成功后才清理文件，避免出现
+    「文件已删但记录仍引用」的不一致状态。
+    """
+    delete_image(image["id"])
+    delete_image_files(image["filename"], image["thumb_filename"])
 
 
 def get_admin_context(request: Request):
@@ -99,12 +143,25 @@ def get_admin_context(request: Request):
 
 # ========== 登录 ==========
 
+def get_login_context(request: Request, error: str = ""):
+    """登录页上下文：未登录时也需要站点名与强调色，保证登录页与前台视觉一致。"""
+    settings = get_all_settings()
+    ctx = {
+        "csrf_token": getattr(request.state, "csrf_token", ""),
+        "site_name": settings.get("site_name", "匿名图片分享"),
+        "accent_color": settings.get("theme_accent_color", "#6c5ce7"),
+    }
+    if error:
+        ctx["error"] = error
+    return ctx
+
+
 @router.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
     admin = get_current_admin(request)
     if admin:
         return RedirectResponse(url="/admin/dashboard", status_code=302)
-    return templates.TemplateResponse(request, "admin/login.html", {"csrf_token": getattr(request.state, "csrf_token", "")})
+    return templates.TemplateResponse(request, "admin/login.html", get_login_context(request))
 
 
 @router.post("/login", response_class=HTMLResponse)
@@ -115,38 +172,32 @@ async def login_action(
     csrf_token: str = Form(""),
 ):
     if not validate_csrf(request, csrf_token):
-        return templates.TemplateResponse(request, "admin/login.html", {
-            "error": "请求无效，请刷新页面重试", "csrf_token": getattr(request.state, "csrf_token", "")
-        })
+        return templates.TemplateResponse(
+            request, "admin/login.html", get_login_context(request, "请求无效，请刷新页面重试")
+        )
 
     # IP 级登录限流，防止攻击者反复错误密码锁定管理员账户
     if not check_login_ip_limit(get_client_ip(request)):
-        return templates.TemplateResponse(request, "admin/login.html", {
-            "error": "尝试次数过多，请稍后再试", "csrf_token": getattr(request.state, "csrf_token", "")
-        })
+        return templates.TemplateResponse(
+            request, "admin/login.html", get_login_context(request, "尝试次数过多，请稍后再试")
+        )
 
     success, result, admin_obj = login(username, password)
     if not success:
-        return templates.TemplateResponse(request, "admin/login.html", {
-            "error": result, "csrf_token": getattr(request.state, "csrf_token", "")
-        })
+        return templates.TemplateResponse(request, "admin/login.html", get_login_context(request, result))
 
     response = RedirectResponse(url="/admin/dashboard", status_code=302)
-    response.set_cookie(
-        key="admin_session",
-        value=result,
-        httponly=True,
-        samesite="lax",
-        secure=_secure_cookie_for_request(request),
-        max_age=86400,
-    )
+    _set_admin_session_cookie(response, result, request)
     set_current_admin_request(request)
     insert_admin_log(admin_obj["id"], admin_obj["username"], "login", "登录成功")
     return response
 
 
-@router.get("/logout")
-async def logout(request: Request):
+@router.post("/logout")
+async def logout(request: Request, csrf_token: str = Form("")):
+    # 退出登录属于状态变更操作，必须使用 POST 并校验 CSRF，避免被跨站链接触发
+    if not validate_csrf(request, csrf_token):
+        return RedirectResponse(url="/admin/dashboard", status_code=302)
     session_id = request.cookies.get("admin_session")
     if session_id:
         destroy_session(session_id)
@@ -249,17 +300,15 @@ async def review_action(
         increment_daily_stat(today_str(), "approved_count")
         invalidate_top_cache()
     elif action == "reject":
-        # 拒绝 = 删除：彻底移除图片文件与记录
-        delete_image_files(image["filename"], image["thumb_filename"])
-        delete_image(image_id)
+        # 拒绝 = 删除：先删数据库记录，成功后再清理图片文件
+        _delete_image_and_files(image)
         insert_admin_log(admin["id"], admin["username"], "reject", "拒绝并删除图片", f"image#{image_id}")
         from app.models import increment_daily_stat, today_str, increment_reject_cooldown
         increment_daily_stat(today_str(), "rejected_count")
         increment_reject_cooldown(image["ip"])
         invalidate_top_cache()
     elif action == "delete":
-        delete_image_files(image["filename"], image["thumb_filename"])
-        delete_image(image_id)
+        _delete_image_and_files(image)
         insert_admin_log(admin["id"], admin["username"], "delete", "删除图片", f"image#{image_id}")
         return RedirectResponse(url="/admin/review", status_code=302)
 
@@ -286,12 +335,11 @@ async def review_batch(
         increment_daily_stat(today_str(), "approved_count")
         invalidate_top_cache()
     elif id_list and action == "rejected":
-        # 拒绝 = 删除：批量删除图片文件与记录
+        # 拒绝 = 删除：批量先删数据库记录，再清理对应文件
         for iid in id_list:
             img = get_image_by_id(iid)
             if img:
-                delete_image_files(img["filename"], img["thumb_filename"])
-                delete_image(iid)
+                _delete_image_and_files(img)
         from app.models import increment_daily_stat, today_str
         increment_daily_stat(today_str(), "rejected_count")
         insert_admin_log(admin["id"], admin["username"], "batch_reject", f"批量删除 {len(id_list)} 张图片", str(id_list))
@@ -398,8 +446,7 @@ async def admin_image_delete(request: Request, image_id: int, csrf_token: str = 
 
     image = get_image_by_id(image_id)
     if image:
-        delete_image_files(image["filename"], image["thumb_filename"])
-        delete_image(image_id)
+        _delete_image_and_files(image)
         insert_admin_log(admin["id"], admin["username"], "delete", "删除图片", f"image#{image_id}")
     return RedirectResponse(url="/admin/images", status_code=302)
 
@@ -495,7 +542,10 @@ async def admin_settings(request: Request):
     if not admin:
         return RedirectResponse(url="/admin/login", status_code=302)
     ctx = get_admin_context(request)
-    ctx["settings"] = get_all_settings()
+    settings = get_all_settings()
+    # 展示时统一为归一化后的域名，便于管理员核对
+    settings["admin_domain"] = ", ".join(normalize_admin_domains(settings.get("admin_domain", ""))[0])
+    ctx["settings"] = settings
     return templates.TemplateResponse(request, "admin/settings.html", ctx)
 
 
@@ -508,6 +558,31 @@ async def admin_settings_save(request: Request, csrf_token: str = Form("")):
         return RedirectResponse(url="/admin/settings", status_code=302)
 
     form = await request.form()
+
+    # 管理域名：先校验，避免其他设置已保存后才发现域名非法
+    domain_submitted = "admin_domain" in form
+    if domain_submitted:
+        raw_admin_domain = form.get("admin_domain", "")
+        new_domains, invalid_domains = normalize_admin_domains(raw_admin_domain)
+    else:
+        raw_admin_domain = get_setting("admin_domain", "") or ""
+        new_domains, invalid_domains = normalize_admin_domains(raw_admin_domain)
+    if invalid_domains:
+        ctx = get_admin_context(request)
+        ctx["settings"] = {**get_all_settings(), "admin_domain": raw_admin_domain}
+        ctx["error"] = (
+            "管理域名格式无效：" + "、".join(invalid_domains)
+            + "。仅允许域名或 IP（可带端口），多个用逗号或换行分隔；"
+            "不要包含 http://、路径、通配符或空格。"
+        )
+        return templates.TemplateResponse(request, "admin/settings.html", ctx)
+
+    if domain_submitted and not new_domains and not is_loopback_host(get_request_host(request)):
+        ctx = get_admin_context(request)
+        ctx["settings"] = {**get_all_settings(), "admin_domain": raw_admin_domain}
+        ctx["error"] = "非本机访问时不能清空管理域名，否则将无法再进入后台。"
+        return templates.TemplateResponse(request, "admin/settings.html", ctx)
+
     enable_captcha = form.get("enable_captcha") == "on"
     site_key = form.get("turnstile_site_key", "").strip()
     secret_key = form.get("turnstile_secret_key", "").strip() or get_setting("turnstile_secret_key", "").strip()
@@ -526,9 +601,6 @@ async def admin_settings_save(request: Request, csrf_token: str = Form("")):
         "turnstile_site_key",
     ]
 
-    # 保存旧管理域名
-    old_admin_domain = get_setting("admin_domain", "")
-
     for key in setting_keys:
         val = form.get(key, "")
         if key in ("allow_author", "enable_captcha", "enable_dedup"):
@@ -540,11 +612,20 @@ async def admin_settings_save(request: Request, csrf_token: str = Form("")):
     if turnstile_secret:
         set_setting("turnstile_secret_key", turnstile_secret)
 
-    # 管理域名特殊处理
-    new_admin_domain = form.get("admin_domain", "")
-    if new_admin_domain != old_admin_domain:
+    # 管理域名特殊处理：数据库为唯一权威配置，保存后立即生效
+    current_raw = get_setting("admin_domain", "") or ""
+    old_domains, _ = normalize_admin_domains(current_raw)
+    new_admin_domain = ",".join(new_domains)
+    if current_raw != new_admin_domain:
+        # 即使只是大小写/端口等归一化差异，也把数据库中的原始值统一为标准形式
         set_setting("admin_domain", new_admin_domain)
-        insert_admin_log(admin["id"], admin["username"], "config", f"管理域名: {old_admin_domain} -> {new_admin_domain}")
+    if old_domains != new_domains:
+        insert_admin_log(
+            admin["id"], admin["username"], "config",
+            f"管理域名: {', '.join(old_domains) or '(空)'} -> {new_admin_domain or '(空)'}"
+        )
+    # 标记已由数据库接管，后续启动不再用 .env 覆盖
+    set_setting("admin_domain_initialized", "1")
 
     # 上传 logo（校验扩展名并使用 UPLOADS_DIR 绝对路径）
     logo_name = await _save_logo(form.get("logo_large_file"), "logo_large")
@@ -562,6 +643,15 @@ async def admin_settings_save(request: Request, csrf_token: str = Form("")):
     invalidate_top_cache()
 
     insert_admin_log(admin["id"], admin["username"], "config", "更新站点设置")
+
+    # 若当前访问的域名已不在新白名单内，则不再重定向（否则会 404），
+    # 改为提示管理员使用新域名重新登录。
+    current_host = get_request_host(request)
+    if new_domains and current_host not in new_domains and not is_loopback_host(current_host):
+        ctx = get_admin_context(request)
+        ctx["new_domains"] = new_domains
+        return templates.TemplateResponse(request, "admin/domain_changed.html", ctx)
+
     return RedirectResponse(url="/admin/settings", status_code=302)
 
 
@@ -760,8 +850,14 @@ async def admin_change_password_action(
         return templates.TemplateResponse(request, "admin/change_password.html", ctx)
 
     update_admin_password(admin["id"], hash_password(new_password))
+    # 先构建页面上下文（此时旧会话仍有效），再撤销旧会话并签发新会话，
+    # 否则模板中的 admin 将因旧会话已失效而为空。
+    ctx = get_admin_context(request)
+    # 撤销其他已登录设备的会话，并为当前设备重新签发会话
+    new_session = rotate_session(admin["id"], admin["username"])
     insert_admin_log(admin["id"], admin["username"], "change_password", "修改密码")
 
-    ctx = get_admin_context(request)
-    ctx["success"] = "密码修改成功"
-    return templates.TemplateResponse(request, "admin/change_password.html", ctx)
+    ctx["success"] = "密码修改成功，其他设备的登录状态已失效"
+    response = templates.TemplateResponse(request, "admin/change_password.html", ctx)
+    _set_admin_session_cookie(response, new_session, request)
+    return response

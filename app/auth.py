@@ -11,12 +11,33 @@ from app.config import LOGIN_MAX_ATTEMPTS, LOGIN_LOCK_MINUTES
 # 会话有效期（小时）
 SESSION_TTL_HOURS = 24
 
+# 过期 Session 清理间隔（秒），避免每次 get_session 都执行 DELETE 写操作
+SESSION_CLEANUP_INTERVAL = 600
+_last_session_cleanup = 0.0
+_session_cleanup_lock = threading.Lock()
+
 # 登录 IP 级限流：同一 IP 在窗口内尝试次数受限，低于账户锁定阈值，
 # 防止攻击者反复错误密码将管理员账户锁定（可用性 DoS）。
 _LOGIN_IP_MAX_ATTEMPTS = 3
 _LOGIN_IP_WINDOW_SECONDS = 900  # 15 分钟
+_LOGIN_IP_CLEANUP_INTERVAL = 300  # 每 5 分钟清理一次过期 IP 记录
 _login_ip_lock = threading.Lock()
 _login_ip_attempts = {}  # ip -> [count, window_start]
+_last_login_ip_cleanup = 0.0
+
+
+def _cleanup_login_ip_attempts(now=None):
+    """清理已过窗口期的 IP 限流记录，防止字典无限增长。调用方需持有锁。"""
+    global _last_login_ip_cleanup
+    if now is None:
+        now = time.time()
+    expired = [
+        ip for ip, entry in _login_ip_attempts.items()
+        if now - entry[1] >= _LOGIN_IP_WINDOW_SECONDS
+    ]
+    for ip in expired:
+        _login_ip_attempts.pop(ip, None)
+    _last_login_ip_cleanup = now
 
 
 def check_login_ip_limit(ip: str) -> bool:
@@ -25,6 +46,8 @@ def check_login_ip_limit(ip: str) -> bool:
         return True
     now = time.time()
     with _login_ip_lock:
+        if now - _last_login_ip_cleanup >= _LOGIN_IP_CLEANUP_INTERVAL:
+            _cleanup_login_ip_attempts(now)
         entry = _login_ip_attempts.get(ip)
         if entry and now - entry[1] < _LOGIN_IP_WINDOW_SECONDS:
             if entry[0] >= _LOGIN_IP_MAX_ATTEMPTS:
@@ -60,8 +83,11 @@ def create_session(admin_id: int, username: str) -> str:
 
 
 def get_session(session_id: str):
-    """从数据库读取会话，过期或不存在返回 None。"""
-    _cleanup_sessions()
+    """从数据库读取会话，过期或不存在返回 None。
+
+    过期清理按固定间隔节流执行，避免每次请求都产生一次 DELETE 写操作。
+    """
+    _maybe_cleanup_sessions()
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     row = get_db().execute(
         "SELECT admin_id, username FROM sessions WHERE session_id=? AND expires_at > ?",
@@ -78,11 +104,37 @@ def destroy_session(session_id: str):
     db.commit()
 
 
+def revoke_admin_sessions(admin_id: int):
+    """撤销指定管理员的全部会话。"""
+    db = get_db()
+    db.execute("DELETE FROM sessions WHERE admin_id=?", (admin_id,))
+    db.commit()
+
+
+def rotate_session(admin_id: int, username: str) -> str:
+    """撤销该管理员的全部旧会话，并为当前设备签发新会话。"""
+    revoke_admin_sessions(admin_id)
+    return create_session(admin_id, username)
+
+
 def _cleanup_sessions():
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     db = get_db()
     db.execute("DELETE FROM sessions WHERE expires_at <= ?", (now,))
     db.commit()
+
+
+def _maybe_cleanup_sessions(force: bool = False):
+    """按 SESSION_CLEANUP_INTERVAL 节流清理过期会话。"""
+    global _last_session_cleanup
+    now = time.time()
+    if not force and now - _last_session_cleanup < SESSION_CLEANUP_INTERVAL:
+        return
+    with _session_cleanup_lock:
+        if not force and now - _last_session_cleanup < SESSION_CLEANUP_INTERVAL:
+            return
+        _cleanup_sessions()
+        _last_session_cleanup = time.time()
 
 
 def login(username: str, password: str) -> tuple:

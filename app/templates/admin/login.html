@@ -3,29 +3,38 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>登录 - 后台管理</title>
-    <link rel="stylesheet" href="/static/css/dark.css">
-    <style>:root{--accent:#6c5ce7}</style>
+    <title>登录 - {{ site_name or '后台管理' }}</title>
+    <meta name="theme-color" content="#0b0b0d">
+    <link rel="stylesheet" href="/static/css/dark.css?v=3">
+    <link rel="stylesheet" href="/static/css/admin.css?v=3">
+    <style>:root { --accent: {{ accent_color | safe_color }}; }</style>
 </head>
 <body>
     <div class="login-page">
         <div class="login-card">
-            <h1>后台管理</h1>
-            {% if error %}
-            <div class="alert alert-error">{{ error }}</div>
-            {% endif %}
+            <div class="login-brand">
+                <h1>{{ site_name or '后台管理' }}</h1>
+                <p>管理后台</p>
+            </div>
+
+            {% if error %}<div class="alert alert-error" role="alert">{{ error }}</div>{% endif %}
+
             <form method="post" action="/admin/login">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <div class="form-group">
-                    <label>用户名</label>
-                    <input type="text" name="username" required autocomplete="username">
+                    <label for="loginUsername">用户名</label>
+                    <input type="text" id="loginUsername" name="username" required
+                           autocomplete="username" autocapitalize="off" spellcheck="false">
                 </div>
                 <div class="form-group">
-                    <label>密码</label>
-                    <input type="password" name="password" required autocomplete="current-password">
+                    <label for="loginPassword">密码</label>
+                    <input type="password" id="loginPassword" name="password" required
+                           autocomplete="current-password">
                 </div>
                 <button type="submit" class="btn btn-primary btn-full">登录</button>
             </form>
+
+            <div class="login-footer">{{ app_name }} {{ app_version }}</div>
         </div>
     </div>
 </body>

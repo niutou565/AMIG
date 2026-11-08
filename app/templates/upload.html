@@ -4,13 +4,13 @@
 {% block content %}
 <div class="upload-page">
     <h1>上传图片</h1>
-    <p class="upload-hint">图片格式支持 JPG、PNG、WebP，最大 10MB，上传后将经过审核后公开展示</p>
+    <p class="upload-hint">支持 JPG / PNG / WebP，单张不超过 10MB。提交后进入审核，通过后公开展示。</p>
 
     {% if error %}
-    <div class="alert alert-error">{{ error }}</div>
+    <div class="alert alert-error" role="alert">{{ error }}</div>
     {% endif %}
     {% if success %}
-    <div class="alert alert-success">{{ success }}</div>
+    <div class="alert alert-success" role="status">{{ success }}</div>
     {% endif %}
 
     <form action="/upload" method="post" enctype="multipart/form-data" class="upload-form" id="uploadForm">
@@ -21,41 +21,51 @@
             <input type="text" name="honeypot" tabindex="-1" autocomplete="off">
         </div>
 
-        <div class="upload-dropzone" id="dropzone">
-            <input type="file" name="image" id="fileInput" accept=".jpg,.jpeg,.png,.webp" required style="display:none">
-            <div class="dropzone-content" id="dropzoneContent">
-                <div class="dropzone-icon">&#128247;</div>
-                <p>拖拽图片到此处或点击选择</p>
-                <p class="dropzone-hint">JPG / PNG / WebP，最大 10MB</p>
+        <div class="upload-dropzone" id="dropzone" role="button" tabindex="0"
+             aria-controls="fileInput" aria-describedby="fileHint">
+            <input type="file" name="image" id="fileInput" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+                   style="display:none">
+            <span class="dropzone-inner" id="dropzoneContent">
+                <span class="dropzone-main">点击选择图片，或拖拽到此处</span>
+                <span class="dropzone-hint" id="fileHint">JPG / PNG / WebP，最大 10MB</span>
+            </span>
+        </div>
+        <p class="field-error" id="fileError" role="alert"></p>
+
+        <div class="upload-preview-wrap" id="previewWrap" hidden>
+            <img id="preview" class="upload-preview" alt="待上传图片预览">
+            <div class="upload-preview-meta">
+                <span class="file-name" id="fileName"></span>
+                <span id="fileSize"></span>
+                <button type="button" class="remove-file" id="removeFile">移除</button>
             </div>
-            <img id="preview" class="upload-preview" style="display:none">
         </div>
 
         <div class="form-group">
             <label for="title">标题 <span class="required">*</span></label>
             <input type="text" name="title" id="title" maxlength="100" required
-                   placeholder="请输入图片标题...">
+                   placeholder="给图片起一个标题">
             <span class="char-count" id="titleCount">0/100</span>
         </div>
 
         <div class="form-group">
             <label for="description">简介（选填）</label>
             <textarea name="description" id="description" rows="3" maxlength="200"
-                      placeholder="可简单描述这张图片..."></textarea>
+                      placeholder="简单描述这张图片…"></textarea>
             <span class="char-count" id="descCount">0/200</span>
         </div>
 
         {% if allow_author %}
         <div class="form-group">
-            <label for="author">署名（选填，不填则显示"匿名用户"）</label>
-            <input type="text" name="author" id="author" maxlength="30" placeholder="留空则匿名">
+            <label for="author">署名（选填）</label>
+            <input type="text" name="author" id="author" maxlength="30" placeholder="留空则显示为匿名用户">
         </div>
         {% endif %}
 
         {% if enable_captcha and turnstile_site_key %}
         <div class="form-group">
             <label>人机验证</label>
-            <div class="cf-turnstile" data-sitekey="{{ turnstile_site_key }}" data-theme="auto" data-callback="turnstileVerified" data-expired-callback="turnstileExpired" data-error-callback="turnstileError"></div>
+            <div class="cf-turnstile" data-sitekey="{{ turnstile_site_key }}" data-theme="dark" data-callback="turnstileVerified" data-expired-callback="turnstileExpired" data-error-callback="turnstileError"></div>
             <p class="form-hint" id="turnstileStatus" aria-live="polite">请完成人机验证后提交</p>
         </div>
         <script>
@@ -81,14 +91,18 @@
         <div class="form-group checkbox-group">
             <label>
                 <input type="checkbox" name="agree" value="1" required>
-                我已阅读并同意<a href="/page/rules" target="_blank">站规</a>
+                <span>我已阅读并同意<a href="/page/rules" target="_blank" rel="noopener">站规</a></span>
             </label>
         </div>
 
-        <button type="submit" class="btn btn-primary btn-full" id="submitBtn">提交上传</button>
+        <div class="form-actions">
+            <button type="submit" class="btn btn-primary btn-full" id="submitBtn">提交上传</button>
+        </div>
+
         <div id="uploadProgress" class="upload-progress" hidden aria-live="polite">
             <div class="upload-progress-track"><div id="uploadProgressBar" class="upload-progress-bar"></div></div>
             <span id="uploadProgressText">准备上传 0%</span>
+            <button type="button" class="cancel-upload" id="cancelUpload" hidden>取消上传</button>
         </div>
     </form>
 </div>
@@ -97,16 +111,110 @@
 {% block scripts %}
 <script>
 (function() {
-    const dropzone = document.getElementById('dropzone');
-    const fileInput = document.getElementById('fileInput');
-    const preview = document.getElementById('preview');
-    const dropzoneContent = document.getElementById('dropzoneContent');
-    const descInput = document.getElementById('description');
-    const descCount = document.getElementById('descCount');
-    const titleInput = document.getElementById('title');
-    const titleCount = document.getElementById('titleCount');
-    const form = document.getElementById('uploadForm');
-    const submitBtn = document.getElementById('submitBtn');
+    var MAX_SIZE = 10 * 1024 * 1024;
+    var dropzone = document.getElementById('dropzone');
+    var fileInput = document.getElementById('fileInput');
+    var dropzoneContent = document.getElementById('dropzoneContent');
+    var previewWrap = document.getElementById('previewWrap');
+    var preview = document.getElementById('preview');
+    var fileNameEl = document.getElementById('fileName');
+    var fileSizeEl = document.getElementById('fileSize');
+    var fileError = document.getElementById('fileError');
+    var removeFileBtn = document.getElementById('removeFile');
+    var descInput = document.getElementById('description');
+    var descCount = document.getElementById('descCount');
+    var titleInput = document.getElementById('title');
+    var titleCount = document.getElementById('titleCount');
+    var form = document.getElementById('uploadForm');
+    var submitBtn = document.getElementById('submitBtn');
+    var progress = document.getElementById('uploadProgress');
+    var progressBar = document.getElementById('uploadProgressBar');
+    var progressText = document.getElementById('uploadProgressText');
+    var cancelUpload = document.getElementById('cancelUpload');
+    var xhr = null;
+    var uploading = false;
+
+    function setError(msg) {
+        fileError.textContent = msg || '';
+        fileError.classList.toggle('show', !!msg);
+    }
+
+    function formatSize(bytes) {
+        if (bytes >= 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+        return Math.max(1, Math.round(bytes / 1024)) + ' KB';
+    }
+
+    function sniffType(buffer) {
+        var b = new Uint8Array(buffer);
+        if (b.length >= 3 && b[0] === 0xFF && b[1] === 0xD8 && b[2] === 0xFF) return 'jpeg';
+        if (b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4E && b[3] === 0x47) return 'png';
+        if (b.length >= 12 && b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 &&
+            b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return 'webp';
+        return null;
+    }
+
+    // 读取文件头，校验真实格式（防止改扩展名绕过前端校验）
+    function verifySignature(file) {
+        return new Promise(function(resolve) {
+            var reader = new FileReader();
+            reader.onload = function() {
+                resolve(sniffType(reader.result) ? true : false);
+            };
+            reader.onerror = function() { resolve(false); };
+            reader.readAsArrayBuffer(file.slice(0, 12));
+        });
+    }
+
+    function resetFile() {
+        fileInput.value = '';
+        preview.removeAttribute('src');
+        previewWrap.hidden = true;
+        dropzone.hidden = false;
+        dropzoneContent.hidden = false;
+    }
+
+    function handleFile(file) {
+        setError('');
+        if (!file) return;
+        var okType = /^image\/(jpeg|png|webp)$/.test(file.type || '') ||
+            /\.(jpg|jpeg|png|webp)$/i.test(file.name || '');
+        if (!okType) {
+            setError('仅支持 JPG、PNG、WebP 格式');
+            resetFile();
+            return;
+        }
+        if (file.size > MAX_SIZE) {
+            setError('图片大小不能超过 10MB（当前 ' + formatSize(file.size) + '）');
+            resetFile();
+            return;
+        }
+        if (file.size === 0) {
+            setError('文件为空，请重新选择');
+            resetFile();
+            return;
+        }
+        verifySignature(file).then(function(valid) {
+            if (!valid) {
+                setError('文件内容不是有效的 JPG / PNG / WebP 图片');
+                resetFile();
+                return;
+            }
+            var reader = new FileReader();
+            reader.onload = function(e) {
+                preview.src = e.target.result;
+                previewWrap.hidden = false;
+                dropzone.hidden = true;
+                fileNameEl.textContent = file.name;
+                fileNameEl.title = file.name;
+                fileSizeEl.textContent = formatSize(file.size);
+            };
+            reader.onerror = function() {
+                setError('图片预览加载失败，请重新选择');
+                resetFile();
+            };
+            reader.readAsDataURL(file);
+        });
+    }
 
     // 字数统计
     if (titleInput) {
@@ -120,16 +228,30 @@
         });
     }
 
-    // 点击选择
+    // 点击 / 键盘选择
     dropzone.addEventListener('click', function() { fileInput.click(); });
+    dropzone.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+            e.preventDefault();
+            fileInput.click();
+        }
+    });
 
     // 拖拽
-    dropzone.addEventListener('dragover', function(e) { e.preventDefault(); dropzone.classList.add('dragover'); });
-    dropzone.addEventListener('dragleave', function() { dropzone.classList.remove('dragover'); });
+    dropzone.addEventListener('dragover', function(e) {
+        e.preventDefault();
+        dropzone.classList.add('dragover');
+    });
+    dropzone.addEventListener('dragleave', function() {
+        dropzone.classList.remove('dragover');
+    });
     dropzone.addEventListener('drop', function(e) {
         e.preventDefault();
         dropzone.classList.remove('dragover');
-        const files = e.dataTransfer.files;
+        var files = e.dataTransfer.files;
+        if (files.length > 1) {
+            setError('一次只能上传一张图片，已选择第 1 张');
+        }
         if (files.length > 0) handleFile(files[0]);
     });
 
@@ -137,67 +259,103 @@
         if (this.files.length > 0) handleFile(this.files[0]);
     });
 
-    function handleFile(file) {
-        if (!file.type.match(/image\/(jpeg|png|webp)/)) {
-            alert('仅支持 JPG、PNG、WebP 格式');
-            return;
-        }
-        if (file.size > 10 * 1024 * 1024) {
-            alert('图片大小不能超过 10MB');
-            return;
-        }
-        const reader = new FileReader();
-        reader.onload = function(e) {
-            preview.src = e.target.result;
-            preview.style.display = 'block';
-            dropzoneContent.style.display = 'none';
-        };
-        reader.readAsDataURL(file);
+    removeFileBtn.addEventListener('click', function() {
+        resetFile();
+        setError('');
+        dropzone.focus();
+    });
+
+    function resetSubmitUI() {
+        uploading = false;
+        submitBtn.disabled = false;
+        submitBtn.textContent = '提交上传';
+        cancelUpload.hidden = true;
+        xhr = null;
     }
 
+    cancelUpload.addEventListener('click', function() {
+        if (xhr) {
+            xhr.abort();
+        }
+    });
+
     form.addEventListener('submit', function(e) {
-        // 若启用了人机验证，确保已完成验证
+        e.preventDefault();
+        if (uploading) return;
+
+        if (!fileInput.files || fileInput.files.length === 0) {
+            setError('请先选择要上传的图片');
+            dropzone.focus();
+            return;
+        }
         var turnstileInput = document.querySelector('input[name="cf-turnstile-response"]');
         if (document.querySelector('.cf-turnstile') && (!turnstileInput || !turnstileInput.value)) {
-            e.preventDefault();
             alert('请先完成人机验证');
             return;
         }
-        e.preventDefault();
+        if (!form.checkValidity()) {
+            form.reportValidity();
+            return;
+        }
+
+        setError('');
+        uploading = true;
         submitBtn.disabled = true;
-        submitBtn.textContent = '上传中...';
-        const progress = document.getElementById('uploadProgress');
-        const progressBar = document.getElementById('uploadProgressBar');
-        const progressText = document.getElementById('uploadProgressText');
+        submitBtn.textContent = '上传中…';
         progress.hidden = false;
-        const xhr = new XMLHttpRequest();
+        progress.classList.remove('is-error');
+        progressBar.style.width = '0%';
+        progressText.textContent = '准备上传 0%';
+        cancelUpload.hidden = false;
+
+        xhr = new XMLHttpRequest();
         xhr.open('POST', form.action, true);
+        xhr.timeout = 120000;
+
         xhr.upload.addEventListener('progress', function(event) {
             if (!event.lengthComputable) return;
-            const percent = Math.min(100, Math.round(event.loaded / event.total * 100));
+            var percent = Math.min(100, Math.round(event.loaded / event.total * 100));
             progressBar.style.width = percent + '%';
             progressText.textContent = '上传中 ' + percent + '%';
         });
+
         xhr.onload = function() {
             if (xhr.status >= 200 && xhr.status < 400) {
                 progressBar.style.width = '100%';
-                progressText.textContent = '上传完成，正在处理图片...';
+                progressText.textContent = '上传完成，正在处理图片…';
+                cancelUpload.hidden = true;
                 document.open();
                 document.write(xhr.responseText);
                 document.close();
-            } else {
-                progressText.textContent = '上传失败，请重试';
-                submitBtn.disabled = false;
-                submitBtn.textContent = '提交上传';
-                if (window.turnstile) turnstile.reset();
+                return;
             }
-        };
-        xhr.onerror = function() {
-            progressText.textContent = '网络错误，请重试';
-            submitBtn.disabled = false;
-            submitBtn.textContent = '提交上传';
+            progress.classList.add('is-error');
+            progressText.textContent = '上传失败（HTTP ' + xhr.status + '），请重试';
+            resetSubmitUI();
             if (window.turnstile) turnstile.reset();
         };
+
+        xhr.onerror = function() {
+            progress.classList.add('is-error');
+            progressText.textContent = '上传失败：网络连接中断，请检查网络后重试';
+            resetSubmitUI();
+            if (window.turnstile) turnstile.reset();
+        };
+
+        xhr.ontimeout = function() {
+            progress.classList.add('is-error');
+            progressText.textContent = '上传超时，请压缩图片或稍后重试';
+            resetSubmitUI();
+            if (window.turnstile) turnstile.reset();
+        };
+
+        xhr.onabort = function() {
+            progressText.textContent = '已取消上传';
+            progressBar.style.width = '0%';
+            resetSubmitUI();
+            if (window.turnstile) turnstile.reset();
+        };
+
         xhr.send(new FormData(form));
     });
 })();

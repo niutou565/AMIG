@@ -5,8 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}{{ site_name }}{% endblock %}</title>
     <meta name="description" content="{{ site_description }}">
+    <meta name="theme-color" content="#0b0b0d">
     <link rel="icon" href="{% if logo_small %}/uploads/{{ logo_small }}{% endif %}" type="image/webp">
-    <link rel="stylesheet" href="/static/css/dark.css?v=2">
+    <link rel="stylesheet" href="/static/css/dark.css?v=3">
     <style>
         :root {
             --accent: {{ accent_color | safe_color }};
@@ -22,11 +23,12 @@
                 <span class="nav-site-name">{{ site_name }}</span>
             </a>
             <div class="nav-links" id="navLinks">
-                <a href="/gallery">查看全部图片</a>
+                <a href="/gallery">图库</a>
                 <a href="/top">热度榜</a>
                 <a href="/upload" class="btn-upload">上传图片</a>
             </div>
-            <button class="nav-toggle" id="navToggle" aria-label="菜单">&#9776;</button>
+            <button class="nav-toggle" id="navToggle" type="button"
+                    aria-label="打开菜单" aria-controls="navLinks" aria-expanded="false">&#9776;</button>
         </div>
     </nav>
 
@@ -55,7 +57,7 @@
         </div>
     </footer>
 
-    <script src="/static/js/main.js"></script>
+    <script src="/static/js/main.js?v=2"></script>
     {% block scripts %}{% endblock %}
 </body>
 </html>

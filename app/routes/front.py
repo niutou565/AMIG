@@ -21,7 +21,7 @@ from app.stats import get_top_cached
 from app.ip_geo import get_client_ip, get_ip_location, get_ip_region
 from app.limiter import check_upload_limit
 from app.ban import check_ban_status
-from app.image_utils import validate_image, process_image
+from app.image_utils import validate_image, process_image, delete_image_files
 from app.middleware import check_sensitive
 from app.display import location_label, uploader_label, safe_color
 import logging
@@ -275,18 +275,19 @@ async def upload_action(
     if content_length.isdigit() and int(content_length) > MAX_UPLOAD_SIZE + 1024 * 1024:
         return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "图片大小超过限制"})
 
-    # 分块读取文件，边读边限制大小
-    file_data = b""
+    # 分块读取文件，边读边限制大小（bytearray 避免大文件反复拼接产生额外内存拷贝）
+    file_data = bytearray()
     while True:
         chunk = await image.read(1024 * 1024)
         if not chunk:
             break
-        file_data += chunk
+        file_data.extend(chunk)
         if len(file_data) > MAX_UPLOAD_SIZE:
             return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "图片大小超过限制"})
 
     if not file_data:
         return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "请选择图片文件"})
+    file_data = bytes(file_data)
 
     # 验证图片
     valid, err_msg = validate_image(file_data, image.filename or "unknown.jpg")
@@ -302,43 +303,62 @@ async def upload_action(
     if not result:
         return templates.TemplateResponse(request, "upload.html", {**ctx, "error": f"图片处理失败：{err_msg}"})
 
-    # 图片去重
-    if get_setting("enable_dedup", "1") == "1":
-        is_dup = check_content_md5_duplicate(result["content_md5"], ip)
-        if is_dup:
-            from app.models import insert_image
-            province, city = await run_in_threadpool(get_ip_location, ip)
-            region = await run_in_threadpool(get_ip_region, ip)
-            img_id = insert_image(
-                result["filename"], result["thumb_filename"],
-                result["original_size"], result["compressed_size"],
-                result["width"], result["height"],
-                description, author, result["content_md5"],
-                ip, ua_val, ua_hash_val, province, city, is_dup=1, title=title, region=region
-            )
+    # 以下流程已把图片写入磁盘；若数据库操作失败或流程异常，必须清理文件，避免孤儿文件
+    saved = False
+    try:
+        # 图片去重
+        if get_setting("enable_dedup", "1") == "1":
+            is_dup = check_content_md5_duplicate(result["content_md5"], ip)
+            if is_dup:
+                from app.models import insert_image
+                province, city = await run_in_threadpool(get_ip_location, ip)
+                region = await run_in_threadpool(get_ip_region, ip)
+                insert_image(
+                    result["filename"], result["thumb_filename"],
+                    result["original_size"], result["compressed_size"],
+                    result["width"], result["height"],
+                    description, author, result["content_md5"],
+                    ip, ua_val, ua_hash_val, province, city, is_dup=1, title=title, region=region
+                )
+                saved = True
+                try:
+                    increment_daily_stat(today_str(), "upload_count")
+                except Exception:
+                    logger.warning("更新上传统计失败（图片已入库）", exc_info=True)
+                return templates.TemplateResponse(request, "upload.html", {
+                    **ctx, "success": "已提交，等待审核通过后公开展示（系统检测到疑似重复图片，将标记审核）"
+                })
+
+        # 存库
+        province, city = await run_in_threadpool(get_ip_location, ip)
+        region = await run_in_threadpool(get_ip_region, ip)
+        from app.models import insert_image
+        insert_image(
+            result["filename"], result["thumb_filename"],
+            result["original_size"], result["compressed_size"],
+            result["width"], result["height"],
+            description, author, result["content_md5"],
+            ip, ua_val, ua_hash_val, province, city, title=title, region=region
+        )
+        saved = True
+
+        # 统计失败不应让用户以为上传失败（图片已成功入库）
+        try:
             increment_daily_stat(today_str(), "upload_count")
-            return templates.TemplateResponse(request, "upload.html", {
-                **ctx, "success": "已提交，等待审核通过后公开展示（系统检测到疑似重复图片，将标记审核）"
-            })
+        except Exception:
+            logger.warning("更新上传统计失败（图片已入库）", exc_info=True)
 
-    # 存库
-    province, city = await run_in_threadpool(get_ip_location, ip)
-    region = await run_in_threadpool(get_ip_region, ip)
-    from app.models import insert_image
-    img_id = insert_image(
-        result["filename"], result["thumb_filename"],
-        result["original_size"], result["compressed_size"],
-        result["width"], result["height"],
-        description, author, result["content_md5"],
-        ip, ua_val, ua_hash_val, province, city, title=title, region=region
-    )
-
-    # 更新统计
-    increment_daily_stat(today_str(), "upload_count")
-
-    return templates.TemplateResponse(request, "upload.html", {
-        **ctx, "success": "已提交，等待审核通过后公开展示"
-    })
+        return templates.TemplateResponse(request, "upload.html", {
+            **ctx, "success": "已提交，等待审核通过后公开展示"
+        })
+    except Exception:
+        logger.exception("上传图片保存失败")
+        return templates.TemplateResponse(request, "upload.html", {
+            **ctx, "error": "保存失败，请稍后重试"
+        })
+    finally:
+        if not saved:
+            delete_image_files(result["filename"], result["thumb_filename"])
 
 
 # ========== 自定义页面 ==========

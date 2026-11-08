@@ -128,22 +128,25 @@ def get_latest_approved_images(limit=12):
 
 
 def get_random_image_prefer_low_heat(exclude_id=None):
-    """随机返回一张已通过图片，权重向热度（点赞数）较低的图片倾斜"""
+    """随机返回一张已通过图片，权重向热度（点赞数）较低的图片倾斜。
+
+    加权抽样在 SQLite 端完成（仅返回一行），避免把全部图片记录加载到
+    Python 内存中。权重 = 1/(like_count+1)，用均匀随机数的倒数做竞速排序。
+    """
     db = get_db()
+    condition = "status='approved'"
+    params = []
     if exclude_id is not None:
-        rows = db.execute(
-            "SELECT id, like_count FROM images WHERE status='approved' AND id != ?",
-            (exclude_id,)
-        ).fetchall()
-    else:
-        rows = db.execute(
-            "SELECT id, like_count FROM images WHERE status='approved'"
-        ).fetchall()
-    if not rows:
-        return None
-    import random
-    weights = [1.0 / (r["like_count"] + 1) for r in rows]
-    return random.choices(rows, weights=weights, k=1)[0]
+        condition += " AND id != ?"
+        params.append(exclude_id)
+    row = db.execute(
+        f"""SELECT id FROM images WHERE {condition}
+            ORDER BY (COALESCE(like_count, 0) + 1) /
+                     ((ABS(RANDOM() % 1000000007) + 1) / 1000000008.0)
+            ASC LIMIT 1""",
+        params
+    ).fetchone()
+    return row
 
 
 def search_approved_images(query, limit=24, offset=0):

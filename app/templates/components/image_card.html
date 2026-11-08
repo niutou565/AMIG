@@ -1,0 +1,18 @@
+{% macro image_card(img, likes=None, rank=None, lazy=True) -%}
+<a href="/image/{{ img.id }}" class="image-card">
+    <span class="card-img-wrap">
+        {% if rank %}
+        <span class="rank-badge {% if rank == 1 %}gold{% elif rank == 2 %}silver{% elif rank == 3 %}bronze{% endif %}">{{ rank }}</span>
+        {% endif %}
+        <img src="/uploads/{{ img.thumb_filename }}" alt="{{ img.title or '未命名' }}"
+             {% if lazy %}loading="lazy"{% endif %} decoding="async">
+    </span>
+    <span class="card-info">
+        <span class="card-desc">{{ img.title or '未命名' }}</span>
+        <span class="card-meta">
+            <span>{{ img|uploader_label }}</span>
+            <span class="like-count">&#10084; {{ likes if likes is not none else img.like_count }}</span>
+        </span>
+    </span>
+</a>
+{%- endmacro %}

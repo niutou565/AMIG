@@ -2,96 +2,107 @@
 {% block title %}图片详情 #{{ image.id }}{% endblock %}
 
 {% block content %}
+<a href="/admin/images" class="detail-back">&larr; 返回图片管理</a>
 <h1>图片详情 #{{ image.id }}</h1>
 
 {% if request.query_params.get('saved') %}
-<div class="alert alert-success">标题/简介已更新</div>
+<div class="alert alert-success" role="status">标题 / 简介已更新</div>
 {% endif %}
 {% if edit_error %}
-<div class="alert alert-error">{{ edit_error }}</div>
+<div class="alert alert-error" role="alert">{{ edit_error }}</div>
 {% endif %}
 
 <div class="review-detail">
     <div class="review-image">
-        <img src="/uploads/{{ image.filename }}" alt="图片" loading="lazy">
+        <img src="/uploads/{{ image.filename }}" alt="图片 #{{ image.id }}" loading="lazy">
     </div>
     <div class="review-info">
-        <p><strong>状态：</strong>
-            {% if image.status == 'pending' %}<span style="color:#f0ad4e">待审核</span>
-            {% else %}<span style="color:#5cb85c">已通过</span>{% endif %}
+        <p><strong>状态</strong>
+            {% if image.status == 'pending' %}<span class="status-badge status-pending">待审核</span>
+            {% else %}<span class="status-badge status-approved">已通过</span>{% endif %}
         </p>
-        <p><strong>标题：</strong>{{ image.title or '-' }}</p>
-        <p><strong>简介：</strong>{{ image.description or '-' }}</p>
-        <p><strong>署名：</strong>{{ image.author or '匿名用户' }}</p>
-        <p><strong>上传者 IP：</strong>{{ image.ip }}</p>
-        <p><strong>地区：</strong>{{ image.province }}{{ image.city }}</p>
-        <p><strong>UA：</strong>{{ image.ua }}</p>
-        <p><strong>上传时间：</strong>{{ image.created_at }}</p>
-        <p><strong>点赞数：</strong>{{ image.like_count }}</p>
-        <p><strong>浏览数：</strong>{{ image.views }}</p>
-        <p><strong>MD5：</strong>{{ image.content_md5 }}</p>
-        {% if image.admin_edited %}<p style="color:#f0ad4e">管理员编辑过</p>{% endif %}
+        <p><strong>标题</strong><span>{{ image.title or '-' }}</span></p>
+        <p><strong>简介</strong><span>{{ image.description or '-' }}</span></p>
+        <p><strong>署名</strong><span>{{ image.author or '匿名用户' }}</span></p>
+        <p><strong>上传者 IP</strong><span>{{ image.ip }}</span></p>
+        <p><strong>地区</strong><span>{{ image.province }}{{ image.city or '' }}</span></p>
+        <p><strong>UA</strong><span title="{{ image.ua }}">{{ image.ua }}</span></p>
+        <p><strong>上传时间</strong><span>{{ image.created_at }}</span></p>
+        <p><strong>点赞 / 浏览</strong><span>{{ image.like_count }} / {{ image.views }}</span></p>
+        <p><strong>MD5</strong><span class="log-target">{{ image.content_md5 }}</span></p>
+        {% if image.admin_edited %}
+        <p><strong>编辑记录</strong><span class="status-badge status-pending">管理员编辑过</span></p>
+        {% endif %}
     </div>
 </div>
 
-<div class="edit-form-section">
+<section class="edit-form-section">
     <h3>编辑标题与简介</h3>
-    <form method="post" action="/admin/images/{{ image.id }}/edit" onsubmit="return confirm('确定保存对标题/简介的修改？')">
+    <form method="post" action="/admin/images/{{ image.id }}/edit">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="form-group">
-            <label>标题（必填，最多 100 字）</label>
-            <input type="text" name="title" value="{{ image.title or '' }}" maxlength="100" required>
+            <label for="editTitle">标题 <span class="required">*</span>（最多 100 字）</label>
+            <input type="text" id="editTitle" name="title" value="{{ image.title or '' }}" maxlength="100" required>
         </div>
         <div class="form-group">
-            <label>简介（最多 200 字）</label>
-            <textarea name="description" rows="3" maxlength="200">{{ image.description or '' }}</textarea>
+            <label for="editDesc">简介（最多 200 字）</label>
+            <textarea id="editDesc" name="description" rows="3" maxlength="200">{{ image.description or '' }}</textarea>
         </div>
-        <button type="submit" class="btn btn-primary">保存</button>
+        <div class="form-actions">
+            <button type="submit" class="btn btn-primary">保存修改</button>
+        </div>
     </form>
+</section>
+
+<div class="panel-head">
+    <h3 style="margin:0">点赞明细（{{ likes_count }}）</h3>
+    {% if likes %}
+    <form method="post" action="/admin/images/{{ image.id }}/clear-likes" id="clearLikesForm">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="like_ids" id="clearLikeIds">
+        <button type="button" class="btn btn-sm btn-danger" onclick="clearSelectedLikes()">清除选中</button>
+    </form>
+    {% endif %}
 </div>
 
-<h3>点赞明细 ({{ likes_count }})</h3>
 {% if likes %}
-<form method="post" action="/admin/images/{{ image.id }}/clear-likes" id="clearLikesForm">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <input type="hidden" name="like_ids" id="clearLikeIds">
-    <button type="button" class="btn btn-sm btn-danger" onclick="clearSelectedLikes()">清除选中</button>
-</form>
-<table class="data-table">
-    <thead>
-        <tr>
-            <th><input type="checkbox" id="selectAllLikes"></th>
-            <th>IP</th>
-            <th>UA哈希</th>
-            <th>地区</th>
-            <th>时间</th>
-        </tr>
-    </thead>
-    <tbody>
-        {% for like in likes %}
-        <tr>
-            <td><input type="checkbox" class="like-check" value="{{ like.id }}"></td>
-            <td>{{ like.ip }}</td>
-            <td>{{ like.ua_hash }}</td>
-            <td>{{ like.province }}{{ like.city }}</td>
-            <td>{{ like.created_at }}</td>
-        </tr>
-        {% endfor %}
-    </tbody>
-</table>
+<div class="table-wrap">
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th><input type="checkbox" id="selectAllLikes" aria-label="全选点赞记录"></th>
+                <th>IP</th>
+                <th>UA 哈希</th>
+                <th>地区</th>
+                <th>时间</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for like in likes %}
+            <tr>
+                <td><input type="checkbox" class="like-check" value="{{ like.id }}" aria-label="选择点赞记录"></td>
+                <td>{{ like.ip }}</td>
+                <td class="log-target">{{ like.ua_hash }}</td>
+                <td>{{ like.province }}{{ like.city or '' }}</td>
+                <td class="log-time">{{ like.created_at }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
 {% else %}
-<p>暂无点赞记录</p>
+<p class="empty-tip">暂无点赞记录</p>
 {% endif %}
 {% endblock %}
 
 {% block scripts %}
 <script>
 document.getElementById('selectAllLikes')?.addEventListener('change', function() {
-    document.querySelectorAll('.like-check').forEach(cb => cb.checked = this.checked);
+    document.querySelectorAll('.like-check').forEach(function (cb) { cb.checked = this.checked; });
 });
 function clearSelectedLikes() {
-    const ids = Array.from(document.querySelectorAll('.like-check:checked')).map(cb => cb.value);
-    if (!ids.length) { alert('请选择点赞记录'); return; }
+    var ids = Array.from(document.querySelectorAll('.like-check:checked')).map(function (cb) { return cb.value; });
+    if (!ids.length) { alert('请先选择点赞记录'); return; }
     if (!confirm('确定清除选中的 ' + ids.length + ' 条点赞记录？')) return;
     document.getElementById('clearLikeIds').value = ids.join(',');
     document.getElementById('clearLikesForm').submit();

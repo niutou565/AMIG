@@ -5,7 +5,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # 应用版本信息
 APP_NAME = "AMIG"
-APP_VERSION = "1.0.7"
+APP_VERSION = "1.0.10"
 
 # 从 .env 文件加载环境变量（必须在读取 os.getenv 之前执行，否则 ADMIN_DOMAIN 等不生效）
 _env_path = BASE_DIR / ".env"
@@ -55,6 +55,17 @@ MAX_IMAGE_DIMENSION = 1920
 THUMB_DIMENSION = 480
 WEBP_QUALITY = 78
 WEBP_EFFORT = 3  # 低 effort 降低 CPU
+
+# 水印字体：默认使用项目内置的 Noto Sans SC（SIL OFL 1.1，支持简体中文），
+# 可通过 WATERMARK_FONT_PATH 环境变量覆盖为其他支持中文的字体文件。
+_watermark_font_env = os.getenv("WATERMARK_FONT_PATH")
+if _watermark_font_env:
+    _watermark_font_path = Path(_watermark_font_env)
+    if not _watermark_font_path.is_absolute():
+        _watermark_font_path = BASE_DIR / _watermark_font_path
+else:
+    _watermark_font_path = BASE_DIR / "app" / "assets" / "fonts" / "NotoSansSC-Regular.otf"
+WATERMARK_FONT_PATH = str(_watermark_font_path)
 
 # 默认限流值
 DEFAULT_UPLOAD_PER_IP = 10

@@ -5,7 +5,7 @@
 <h1>站点设置</h1>
 
 {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
-<form method="post" action="/admin/settings" enctype="multipart/form-data">
+<form method="post" action="/admin/settings" enctype="multipart/form-data" class="settings-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 
     <h3>基本信息</h3>
@@ -22,14 +22,14 @@
     <div class="form-group">
         <label>大 Logo（首页）</label>
         {% if settings.get('logo_large') %}
-        <p>当前：<img src="/uploads/{{ settings.logo_large }}" style="max-height:60px"></p>
+        <p class="logo-preview-line">当前：<img src="/uploads/{{ settings.logo_large }}" class="logo-preview" alt="当前大 Logo"></p>
         {% endif %}
         <input type="file" name="logo_large_file" accept="image/*">
     </div>
     <div class="form-group">
         <label>小 Logo（导航栏/Favicon）</label>
         {% if settings.get('logo_small') %}
-        <p>当前：<img src="/uploads/{{ settings.logo_small }}" style="max-height:30px"></p>
+        <p class="logo-preview-line">当前：<img src="/uploads/{{ settings.logo_small }}" class="logo-preview logo-preview-small" alt="当前小 Logo"></p>
         {% endif %}
         <input type="file" name="logo_small_file" accept="image/*">
     </div>
@@ -47,15 +47,23 @@
     <h3>外观</h3>
     <div class="form-group">
         <label>主题强调色</label>
-        <input type="color" name="theme_accent_color" value="{{ settings.get('theme_accent_color', '#6c5ce7') }}" style="width:60px;height:40px;padding:2px">
-        <span>{{ settings.get('theme_accent_color', '#6c5ce7') }}</span>
+        <input type="color" name="theme_accent_color" value="{{ settings.get('theme_accent_color', '#6c5ce7') }}">
+        <span class="color-value">{{ settings.get('theme_accent_color', '#6c5ce7') }}</span>
     </div>
 
-    <h3>管理域名 <span style="color:#d9534f;font-size:0.8rem">（修改前请确认新域名已解析并配置 nginx）</span></h3>
+    <h3>管理域名 <span class="heading-note">（保存后立即生效，旧域名立刻失效）</span></h3>
     <div class="form-group">
-        <label>管理域名（多个用逗号分隔）</label>
-        <input type="text" name="admin_domain" value="{{ settings.get('admin_domain', '') }}" placeholder="admin.example.com">
-        <p class="form-hint">修改后旧域名立即失效，请确保新域名已正确配置</p>
+        <label>后台管理域名白名单（多个用逗号或换行分隔）</label>
+        <textarea name="admin_domain" rows="3" placeholder="admin.example.com, admin2.example.com">{{ settings.get('admin_domain', '') }}</textarea>
+        <p class="form-hint">
+            由数据库统一维护，保存后立即生效：修改无需改 <code>.env</code>、systemd 或重启服务。
+            支持域名、IPv4、IPv6（如 <code>[::1]</code>），可带端口；会自动转为小写并忽略协议前缀与末尾斜杠。
+            删除某个域名后，该域名立即失去后台访问权限。
+        </p>
+        <p class="form-hint danger-note">
+            修改前请确认新域名已完成 DNS 解析并加入 Nginx <code>server_name</code>；
+            清空白名单后仅本机（回环地址）可访问后台。
+        </p>
     </div>
 
     <h3>上传限制</h3>
@@ -125,6 +133,41 @@
         <p class="form-hint">Secret Key 在 Cloudflare Turnstile 后台获取；出于安全不回显，留空保存不会清除已配置的密钥。</p>
     </div>
 
-    <button type="submit" class="btn btn-primary" onclick="return confirm('确定保存设置？')">保存设置</button>
+    <button type="submit" class="btn btn-primary">保存设置</button>
 </form>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+    var oldRaw = {{ settings.get('admin_domain', '') | tojson }};
+    function normalizeList(value) {
+        return String(value)
+            .split(/[,;\r\n]+/)
+            .map(function (item) {
+                return item.trim().toLowerCase()
+                    .replace(/^https?:\/\//, '')
+                    .replace(/\/+$/, '');
+            })
+            .filter(function (item) { return item.length > 0; })
+            .join(',');
+    }
+    var form = document.querySelector('form[action="/admin/settings"]');
+    if (!form) return;
+    form.addEventListener('submit', function (event) {
+        var input = form.querySelector('textarea[name="admin_domain"]');
+        var newNorm = normalizeList(input ? input.value : '');
+        if (newNorm === normalizeList(oldRaw)) {
+            if (!confirm('确定保存设置？')) event.preventDefault();
+            return;
+        }
+        var message = newNorm
+            ? '确认将后台管理域名白名单修改为：\n' + newNorm.split(',').join('\n') +
+              '\n\n保存后旧域名将立即失去后台访问权限，需要改用新域名重新登录。\n' +
+              '若新域名尚未完成 DNS 解析和 Nginx 配置，将无法再进入后台，请务必确认。'
+            : '确认清空管理域名白名单？\n清空后仅本机（回环地址）可以访问后台。';
+        if (!confirm(message)) event.preventDefault();
+    });
+})();
+</script>
 {% endblock %}

@@ -1,0 +1,24 @@
+{% extends "admin/admin_base.html" %}
+{% block title %}管理域名已更新{% endblock %}
+
+{% block content %}
+<h1>管理域名已更新</h1>
+
+<div class="alert alert-success" role="status">管理域名白名单已保存并立即生效，旧域名已失去后台访问权限。</div>
+
+<h3>当前白名单</h3>
+<ul class="list-plain">
+    {% for domain in new_domains %}
+    <li><code>{{ domain }}</code></li>
+    {% endfor %}
+</ul>
+
+<p class="text-muted">由于你当前使用的域名已不在白名单内，请改用新域名重新登录后台（原登录状态仅对旧域名有效）。</p>
+<p style="margin-top:16px">
+    <a class="btn btn-primary" href="//{{ new_domains[0] }}/admin/login">前往 {{ new_domains[0] }} 登录</a>
+</p>
+<p class="form-hint">
+    如果新域名尚未完成 DNS 解析或 Nginx <code>server_name</code> 配置，
+    可先在本机通过回环地址访问后台修正配置。
+</p>
+{% endblock %}

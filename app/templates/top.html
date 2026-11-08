@@ -3,26 +3,27 @@
 
 {% block content %}
 <div class="page-header">
-    <h1>热度榜</h1>
-    <p class="page-subtitle">近 {{ window_days }} 天内点赞最多的图片</p>
+    <div>
+        <h1>热度榜</h1>
+        <p class="page-subtitle">近 {{ window_days }} 天内点赞最多的图片</p>
+    </div>
 </div>
 
 {% if images %}
 <div class="top-list">
     {% for img in images %}
     {% set card_text = img.title or '未命名' %}
+    {% set rank = loop.index + (page - 1) * 24 %}
     <a href="/image/{{ img.id }}" class="top-item">
-        <span class="top-rank {% if loop.index + (page-1)*24 == 1 %}gold{% elif loop.index + (page-1)*24 == 2 %}silver{% elif loop.index + (page-1)*24 == 3 %}bronze{% endif %}">{{ loop.index + (page-1) * 24 }}</span>
-        <div class="top-thumb">
-            <img src="/uploads/{{ img.thumb_filename }}" alt="{{ card_text }}" loading="lazy">
-        </div>
-        <div class="top-info">
-            <p class="top-desc">{{ card_text[:60] }}{% if card_text|length > 60 %}...{% endif %}</p>
-            <p class="top-meta">
-                <span>{{ img|uploader_label }}</span>
-            </p>
-        </div>
-        <div class="top-likes">&#10084; {{ img.window_likes }}</div>
+        <span class="top-rank {% if rank == 1 %}gold{% elif rank == 2 %}silver{% elif rank == 3 %}bronze{% endif %}">{{ rank }}</span>
+        <span class="top-thumb">
+            <img src="/uploads/{{ img.thumb_filename }}" alt="{{ card_text }}" loading="lazy" decoding="async">
+        </span>
+        <span class="top-info">
+            <span class="top-desc">{{ card_text }}</span>
+            <span class="top-meta">{{ img|uploader_label }}</span>
+        </span>
+        <span class="top-likes">&#10084; {{ img.window_likes }}</span>
     </a>
     {% endfor %}
 </div>
@@ -31,6 +32,7 @@
 {% else %}
 <div class="empty-state">
     <p>暂无热度数据</p>
+    <a href="/gallery" class="btn">浏览图库</a>
 </div>
 {% endif %}
 {% endblock %}

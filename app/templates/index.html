@@ -1,37 +1,31 @@
 {% extends "base.html" %}
+{% from "components/image_card.html" import image_card %}
 {% block title %}{{ site_name }} - 匿名图片分享{% endblock %}
 
 {% block content %}
 <div class="hero">
-    {% if logo_large %}
-    <img src="/uploads/{{ logo_large }}" alt="logo" class="hero-logo">
-    {% endif %}
-    <h1 class="hero-title">{{ site_name }}</h1>
+    <div class="hero-brand">
+        {% if logo_large %}
+        <img src="/uploads/{{ logo_large }}" alt="logo" class="hero-logo">
+        {% endif %}
+        <h1 class="hero-title">{{ site_name }}</h1>
+    </div>
     <p class="hero-desc">{{ site_description }}</p>
-    <form action="/gallery" method="get" class="search-form">
-        <input type="text" name="q" placeholder="搜索标题、简介或署名..." class="search-input">
+    <form action="/gallery" method="get" class="search-form" role="search">
+        <input type="text" name="q" placeholder="搜索标题、简介或署名…" class="search-input"
+               aria-label="搜索图片">
         <button type="submit" class="search-btn">搜索</button>
     </form>
 </div>
 
 {% if random_images %}
 <section class="section">
-    <h2 class="section-title">随机精选</h2>
+    <div class="section-head">
+        <h2 class="section-title">随机精选</h2>
+    </div>
     <div class="image-grid">
         {% for img in random_images %}
-        {% set card_text = img.title or '未命名' %}
-        <a href="/image/{{ img.id }}" class="image-card">
-            <div class="card-img-wrap">
-                <img src="/uploads/{{ img.thumb_filename }}" alt="{{ card_text }}" loading="lazy">
-            </div>
-            <div class="card-info">
-                <p class="card-desc">{{ card_text[:50] }}{% if card_text|length > 50 %}...{% endif %}</p>
-                <p class="card-meta">
-                    <span>{{ img|uploader_label }}</span>
-                    <span class="like-count">&#10084; {{ img.like_count }}</span>
-                </p>
-            </div>
-        </a>
+        {{ image_card(img, lazy=(loop.index > 4)) }}
         {% endfor %}
     </div>
 </section>
@@ -39,22 +33,13 @@
 
 {% if latest_images %}
 <section class="section">
-    <h2 class="section-title">最新通过</h2>
+    <div class="section-head">
+        <h2 class="section-title">最新通过</h2>
+        <a href="/gallery" class="section-link">查看全部 →</a>
+    </div>
     <div class="image-grid">
         {% for img in latest_images %}
-        {% set card_text = img.title or '未命名' %}
-        <a href="/image/{{ img.id }}" class="image-card">
-            <div class="card-img-wrap">
-                <img src="/uploads/{{ img.thumb_filename }}" alt="{{ card_text }}" loading="lazy">
-            </div>
-            <div class="card-info">
-                <p class="card-desc">{{ card_text[:50] }}{% if card_text|length > 50 %}...{% endif %}</p>
-                <p class="card-meta">
-                    <span>{{ img|uploader_label }}</span>
-                    <span class="like-count">&#10084; {{ img.like_count }}</span>
-                </p>
-            </div>
-        </a>
+        {{ image_card(img, lazy=(loop.index > 4)) }}
         {% endfor %}
     </div>
 </section>
@@ -62,26 +47,13 @@
 
 {% if top_images %}
 <section class="section">
-    <h2 class="section-title">
-        本月热度榜
-        <a href="/top" class="section-link">查看完整榜单 &#8594;</a>
-    </h2>
+    <div class="section-head">
+        <h2 class="section-title">本月热度榜</h2>
+        <a href="/top" class="section-link">完整榜单 →</a>
+    </div>
     <div class="image-grid">
         {% for img in top_images %}
-        {% set card_text = img.title or '未命名' %}
-        <a href="/image/{{ img.id }}" class="image-card">
-            <div class="card-img-wrap">
-                <span class="rank-badge {% if loop.index == 1 %}gold{% elif loop.index == 2 %}silver{% elif loop.index == 3 %}bronze{% endif %}">{{ loop.index }}</span>
-                <img src="/uploads/{{ img.thumb_filename }}" alt="{{ card_text }}" loading="lazy">
-            </div>
-            <div class="card-info">
-                <p class="card-desc">{{ card_text[:50] }}{% if card_text|length > 50 %}...{% endif %}</p>
-                <p class="card-meta">
-                    <span>{{ img|uploader_label }}</span>
-                    <span class="like-count">&#10084; {{ img.window_likes }}</span>
-                </p>
-            </div>
-        </a>
+        {{ image_card(img, likes=img.window_likes, rank=loop.index) }}
         {% endfor %}
     </div>
 </section>

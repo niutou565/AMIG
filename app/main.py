@@ -7,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
 from app.config import UPLOADS_DIR, BASE_DIR, APP_VERSION
+from app.admin_domains import ensure_admin_domain_initialized
 from app.database import init_db, close_db
 from app.middleware import AdminDomainMiddleware, CSRFMiddleware, SecurityHeadersMiddleware
 from app.display import safe_color
@@ -68,6 +69,8 @@ app.include_router(api.router)
 @app.on_event("startup")
 async def startup():
     init_db()
+    # 仅首次运行/旧库迁移时用 .env 初始化管理域名；之后数据库为唯一权威配置
+    ensure_admin_domain_initialized()
     print("[INFO] Application started")
 
 

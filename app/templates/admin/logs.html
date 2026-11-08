@@ -5,9 +5,10 @@
 <h1>操作日志</h1>
 
 <div class="toolbar">
-    <form class="log-search" method="get" action="/admin/logs">
-        <input type="text" name="q" placeholder="关键词搜索（图片编号 image#123 / 详情 / 管理员）" value="{{ q }}" class="log-search-q">
-        <select name="action">
+    <form class="log-search" method="get" action="/admin/logs" role="search">
+        <input type="text" name="q" placeholder="关键词（如 image#123 / 详情 / 管理员）" value="{{ q }}"
+               class="log-search-q" aria-label="关键词">
+        <select name="action" aria-label="操作类型">
             <option value="">全部操作类型</option>
             <option value="login" {% if action == 'login' %}selected{% endif %}>登录</option>
             <option value="approve" {% if action == 'approve' %}selected{% endif %}>通过</option>
@@ -26,9 +27,9 @@
             <option value="page" {% if action == 'page' %}selected{% endif %}>页面管理</option>
             <option value="change_password" {% if action == 'change_password' %}selected{% endif %}>修改密码</option>
         </select>
-        <input type="text" name="ip" placeholder="IP 地址" value="{{ ip }}">
-        <input type="date" name="date_from" value="{{ date_from }}" title="开始日期">
-        <input type="date" name="date_to" value="{{ date_to }}" title="结束日期">
+        <input type="text" name="ip" placeholder="IP 地址" value="{{ ip }}" aria-label="IP 地址">
+        <input type="date" name="date_from" value="{{ date_from }}" aria-label="开始日期" title="开始日期">
+        <input type="date" name="date_to" value="{{ date_to }}" aria-label="结束日期" title="结束日期">
         <button type="submit" class="btn btn-sm btn-primary">搜索</button>
         <a href="/admin/logs" class="btn btn-sm">清除筛选</a>
     </form>
@@ -36,40 +37,42 @@
 
 <p class="search-result-info">
     {% if q %}
-    搜索「<strong class="hl-text">{{ q }}</strong>」找到 {{ total }} 条日志
+    搜索「<span class="hl-text">{{ q }}</span>」找到 {{ total }} 条日志
     {% else %}
     共 {{ total }} 条日志
     {% endif %}
 </p>
 
-<table class="data-table log-table">
-    <thead>
-        <tr>
-            <th>时间</th>
-            <th>管理员</th>
-            <th>动作</th>
-            <th>详情</th>
-            <th>目标</th>
-            <th>IP 地址</th>
-        </tr>
-    </thead>
-    <tbody>
-        {% for log in logs %}
-        <tr id="log-{{ log.id }}">
-            <td class="log-time">{{ log.created_at[:19] }}</td>
-            <td>{{ log.admin_name | highlight(q) }}</td>
-            <td><span class="action-tag action-{{ log.action }}">{{ log.action }}</span></td>
-            <td>{{ log.detail | highlight(q) }}</td>
-            <td class="log-target">{{ log.target | highlight(q) }}</td>
-            <td>{{ log.ip or '-' }}</td>
-        </tr>
-        {% else %}
-        <tr>
-            <td colspan="6" class="empty-tip">暂无日志</td>
-        </tr>
-        {% endfor %}
-    </tbody>
-</table>
+<div class="table-wrap">
+    <table class="data-table log-table">
+        <thead>
+            <tr>
+                <th>时间</th>
+                <th>管理员</th>
+                <th>动作</th>
+                <th>详情</th>
+                <th>目标</th>
+                <th>IP 地址</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for log in logs %}
+            <tr id="log-{{ log.id }}">
+                <td class="log-time">{{ log.created_at[:19] }}</td>
+                <td>{{ log.admin_name | highlight(q) }}</td>
+                <td><span class="action-tag action-{{ log.action }}">{{ log.action }}</span></td>
+                <td>{{ log.detail | highlight(q) }}</td>
+                <td class="log-target">{{ log.target | highlight(q) }}</td>
+                <td>{{ log.ip or '-' }}</td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="6">暂无日志</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
 
 {% include "components/pagination.html" %}
 {% endblock %}

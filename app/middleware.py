@@ -1,45 +1,10 @@
 """Middleware: Host validation, admin domain control, CSRF protection"""
-import ipaddress
 import secrets
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
-from app.config import ADMIN_DOMAIN, COOKIE_SECURE, HSTS_MAX_AGE, HSTS_INCLUDE_SUBDOMAINS
 
-
-# ========== Admin domain checks ==========
-
-def get_admin_domains():
-    from app.models import get_setting
-    env_domains = ADMIN_DOMAIN
-    db_domains = get_setting("admin_domain", "")
-    all_domains = set()
-    for src in (env_domains, db_domains):
-        if src:
-            for d in src.split(","):
-                d = d.strip().lower()
-                if d:
-                    all_domains.add(d)
-    return all_domains
-
-
-def _is_loopback_host(host: str) -> bool:
-    """精确判定回环地址，避免 `127.` 前缀误放行（如 127.evil.com）。"""
-    if host == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
-
-
-def is_admin_access(request) -> bool:
-    host = request.headers.get("host", "").lower().split(":")[0]
-    if _is_loopback_host(host):
-        return True
-    domains = get_admin_domains()
-    if not domains:
-        return False  # 未配置管理域名时，拒绝非本地访问（默认安全）
-    return host in domains
+from app.admin_domains import get_request_host, is_admin_access, is_loopback_host
+from app.config import COOKIE_SECURE, HSTS_MAX_AGE, HSTS_INCLUDE_SUBDOMAINS
 
 
 class AdminDomainMiddleware(BaseHTTPMiddleware):
@@ -67,8 +32,7 @@ def get_or_create_csrf_token(request) -> str:
 
 
 def _secure_cookie_for_request(request) -> bool:
-    host = request.headers.get("host", "").lower().split(":")[0]
-    return COOKIE_SECURE and not _is_loopback_host(host)
+    return COOKIE_SECURE and not is_loopback_host(get_request_host(request))
 
 
 def set_csrf_cookie(response: Response, token: str, request):

@@ -2,37 +2,57 @@
 {% block title %}页面管理{% endblock %}
 
 {% block content %}
-<h1>页面管理</h1>
-<p><a href="/admin/pages/edit" class="btn btn-primary">新增页面</a></p>
+<div class="page-header">
+    <h1>页面管理</h1>
+    <a href="/admin/pages/edit" class="btn btn-primary">新增页面</a>
+</div>
 
-<table class="data-table">
-    <thead>
-        <tr>
-            <th>标题</th>
-            <th>Slug</th>
-            <th>排序</th>
-            <th>状态</th>
-            <th>更新时间</th>
-            <th>操作</th>
-        </tr>
-    </thead>
-    <tbody>
-        {% for p in pages %}
-        <tr>
-            <td>{{ p.title }}</td>
-            <td>{{ p.slug }}</td>
-            <td>{{ p.sort_order }}</td>
-            <td>{{ '显示' if p.is_visible else '隐藏' }}</td>
-            <td>{{ p.updated_at[:10] }}</td>
-            <td>
-                <a href="/admin/pages/edit/{{ p.id }}" class="btn btn-sm">编辑</a>
-                <form method="post" action="/admin/pages/delete/{{ p.id }}" style="display:inline" onsubmit="return confirm('确定删除？')">
-                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                    <button type="submit" class="btn btn-sm btn-danger">删除</button>
-                </form>
-            </td>
-        </tr>
-        {% endfor %}
-    </tbody>
-</table>
+{% if pages %}
+<div class="table-wrap">
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>标题</th>
+                <th>Slug</th>
+                <th>排序</th>
+                <th>状态</th>
+                <th>更新时间</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for p in pages %}
+            <tr>
+                <td>{{ p.title }}</td>
+                <td class="log-target">{{ p.slug }}</td>
+                <td>{{ p.sort_order }}</td>
+                <td>
+                    {% if p.is_visible %}
+                    <span class="status-badge status-approved">显示</span>
+                    {% else %}
+                    <span class="status-badge status-muted">隐藏</span>
+                    {% endif %}
+                </td>
+                <td class="log-time">{{ p.updated_at[:10] }}</td>
+                <td>
+                    <div class="row-actions">
+                        <a href="/admin/pages/edit/{{ p.id }}" class="btn btn-sm">编辑</a>
+                        <form method="post" action="/admin/pages/delete/{{ p.id }}"
+                              onsubmit="return confirm('确定删除该页面？删除后无法恢复。')">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                            <button type="submit" class="btn btn-sm btn-danger">删除</button>
+                        </form>
+                    </div>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% else %}
+<div class="empty-state">
+    <p>还没有自定义页面</p>
+    <a href="/admin/pages/edit" class="btn btn-primary">新建页面</a>
+</div>
+{% endif %}
 {% endblock %}

@@ -10,6 +10,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app.database import init_db, get_db
 from app.models import now_iso, today_str
+from app.admin_domains import ensure_admin_domain_initialized, normalize_admin_domains
+from app.config import ADMIN_DOMAIN
 
 
 def main():
@@ -63,7 +65,7 @@ def main():
         "enable_captcha": "0",
         "enable_dedup": "1",
         "sensitive_words": "",
-        "admin_domain": "",
+        "admin_domain": ",".join(normalize_admin_domains(ADMIN_DOMAIN)[0]),
     }
     for key, value in default_settings.items():
         existing = db.execute("SELECT key FROM settings WHERE key=?", (key,)).fetchone()
@@ -72,6 +74,8 @@ def main():
                 "INSERT INTO settings (key, value) VALUES (?,?)", (key, value)
             )
     db.commit()
+    # 旧库迁移：数据库未配置管理域名时，用 .env 的 ADMIN_DOMAIN 初始化一次
+    ensure_admin_domain_initialized()
     print("  -> 完成")
 
     # 4. 预置示例页面

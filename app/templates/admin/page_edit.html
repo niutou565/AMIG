@@ -4,36 +4,49 @@
 {% block content %}
 <h1>{% if page_obj %}编辑{% else %}新增{% endif %}页面</h1>
 
-<form method="post" action="/admin/pages/save">
+<form method="post" action="/admin/pages/save" class="settings-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <input type="hidden" name="page_id" value="{{ page_obj.id if page_obj else '' }}">
 
-    <div class="form-group">
-        <label>Slug <span class="required">*</span></label>
-        <input type="text" name="slug" value="{{ page_obj.slug if page_obj else '' }}" required placeholder="about">
-    </div>
-    <div class="form-group">
-        <label>标题 <span class="required">*</span></label>
-        <input type="text" name="title" value="{{ page_obj.title if page_obj else '' }}" required>
-    </div>
-    <div class="form-group">
-        <label>内容（支持 HTML，换行自动转为 &lt;br&gt;）</label>
-        <textarea name="content" rows="15" style="font-family:monospace">{{ page_obj.content if page_obj else '' }}</textarea>
-    </div>
     <div class="form-row">
         <div class="form-group">
-            <label>排序</label>
-            <input type="number" name="sort_order" value="{{ page_obj.sort_order if page_obj else 0 }}">
+            <label for="pageSlug">Slug <span class="required">*</span></label>
+            <input type="text" id="pageSlug" name="slug" value="{{ page_obj.slug if page_obj else '' }}"
+                   required placeholder="about">
+            <p class="form-hint">访问地址为 /page/&lt;slug&gt;。</p>
         </div>
         <div class="form-group">
-            <label>状态</label>
-            <select name="is_visible">
+            <label for="pageTitle">标题 <span class="required">*</span></label>
+            <input type="text" id="pageTitle" name="title" value="{{ page_obj.title if page_obj else '' }}" required>
+        </div>
+    </div>
+
+    <div class="form-group">
+        <label for="pageContent">内容</label>
+        <textarea id="pageContent" name="content" rows="14" class="mono-input">{{ page_obj.content if page_obj else '' }}</textarea>
+        <p class="form-hint">
+            内容按纯文本渲染：HTML 标签会被自动转义、不会执行，换行会保留。
+            如需编写 HTML，请勿依赖此字段。
+        </p>
+    </div>
+
+    <div class="form-row">
+        <div class="form-group">
+            <label for="pageSort">排序</label>
+            <input type="number" id="pageSort" name="sort_order" value="{{ page_obj.sort_order if page_obj else 0 }}">
+        </div>
+        <div class="form-group">
+            <label for="pageVisible">状态</label>
+            <select id="pageVisible" name="is_visible">
                 <option value="1" {% if page_obj and page_obj.is_visible %}selected{% endif %}>显示</option>
                 <option value="0" {% if page_obj and not page_obj.is_visible %}selected{% endif %}>隐藏</option>
             </select>
         </div>
     </div>
-    <button type="submit" class="btn btn-primary">保存</button>
-    <a href="/admin/pages" class="btn">取消</a>
+
+    <div class="form-actions">
+        <button type="submit" class="btn btn-primary">保存</button>
+        <a href="/admin/pages" class="btn">取消</a>
+    </div>
 </form>
 {% endblock %}

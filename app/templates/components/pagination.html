@@ -1,12 +1,12 @@
 {% macro pagination(total_pages, page, base_url) %}
 {% if total_pages > 1 %}
-<div class="pagination">
+<nav class="pagination" aria-label="分页导航">
     {% if page > 1 %}
-    <a href="{{ base_url }}&page={{ page - 1 }}" class="page-link">&laquo; 上一页</a>
+    <a href="{{ base_url }}&page={{ page - 1 }}" class="page-link" rel="prev">&laquo; 上一页</a>
     {% endif %}
     {% for p in range(1, total_pages + 1) %}
         {% if p == page %}
-        <span class="page-link active">{{ p }}</span>
+        <span class="page-link active" aria-current="page">{{ p }}</span>
         {% elif p <= 3 or p > total_pages - 3 or (p >= page - 2 and p <= page + 2) %}
         <a href="{{ base_url }}&page={{ p }}" class="page-link">{{ p }}</a>
         {% elif p == 4 or p == total_pages - 3 %}
@@ -14,20 +14,20 @@
         {% endif %}
     {% endfor %}
     {% if page < total_pages %}
-    <a href="{{ base_url }}&page={{ page + 1 }}" class="page-link">下一页 &raquo;</a>
+    <a href="{{ base_url }}&page={{ page + 1 }}" class="page-link" rel="next">下一页 &raquo;</a>
     {% endif %}
-</div>
+</nav>
 {% endif %}
 {% endmacro %}
 
 {% if total_pages > 1 %}
-<div class="pagination">
+<nav class="pagination" aria-label="分页导航">
     {% if page > 1 %}
-    <a href="?{% if query %}q={{ query }}&{% endif %}{% if q %}q={{ q | urlencode }}&{% endif %}{% if status %}status={{ status }}&{% endif %}{% if sort %}sort={{ sort }}&{% endif %}{% if action %}action={{ action }}&{% endif %}{% if ip %}ip={{ ip }}&{% endif %}{% if location %}location={{ location }}&{% endif %}{% if date_from %}date_from={{ date_from }}&{% endif %}{% if date_to %}date_to={{ date_to }}&{% endif %}page={{ page - 1 }}" class="page-link">&laquo; 上一页</a>
+    <a href="?{% if query %}q={{ query | urlencode }}&{% endif %}{% if q %}q={{ q | urlencode }}&{% endif %}{% if status %}status={{ status | urlencode }}&{% endif %}{% if sort %}sort={{ sort | urlencode }}&{% endif %}{% if action %}action={{ action | urlencode }}&{% endif %}{% if ip %}ip={{ ip | urlencode }}&{% endif %}{% if location %}location={{ location | urlencode }}&{% endif %}{% if date_from %}date_from={{ date_from | urlencode }}&{% endif %}{% if date_to %}date_to={{ date_to | urlencode }}&{% endif %}page={{ page - 1 }}" class="page-link" rel="prev">&laquo; 上一页</a>
     {% endif %}
-    <span class="page-link active">{{ page }} / {{ total_pages }}</span>
+    <span class="page-link active" aria-current="page">{{ page }} / {{ total_pages }}</span>
     {% if page < total_pages %}
-    <a href="?{% if query %}q={{ query }}&{% endif %}{% if q %}q={{ q | urlencode }}&{% endif %}{% if status %}status={{ status }}&{% endif %}{% if sort %}sort={{ sort }}&{% endif %}{% if action %}action={{ action }}&{% endif %}{% if ip %}ip={{ ip }}&{% endif %}{% if location %}location={{ location }}&{% endif %}{% if date_from %}date_from={{ date_from }}&{% endif %}{% if date_to %}date_to={{ date_to }}&{% endif %}page={{ page + 1 }}" class="page-link">下一页 &raquo;</a>
+    <a href="?{% if query %}q={{ query | urlencode }}&{% endif %}{% if q %}q={{ q | urlencode }}&{% endif %}{% if status %}status={{ status | urlencode }}&{% endif %}{% if sort %}sort={{ sort | urlencode }}&{% endif %}{% if action %}action={{ action | urlencode }}&{% endif %}{% if ip %}ip={{ ip | urlencode }}&{% endif %}{% if location %}location={{ location | urlencode }}&{% endif %}{% if date_from %}date_from={{ date_from | urlencode }}&{% endif %}{% if date_to %}date_to={{ date_to | urlencode }}&{% endif %}page={{ page + 1 }}" class="page-link" rel="next">下一页 &raquo;</a>
     {% endif %}
-</div>
+</nav>
 {% endif %}

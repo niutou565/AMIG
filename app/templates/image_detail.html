@@ -2,58 +2,61 @@
 {% block title %}{{ image.title or image.description[:30] or '未命名' }} - {{ site_name }}{% endblock %}
 
 {% block content %}
-<div class="image-detail">
-    <div class="detail-image-wrap">
-        <a href="/uploads/{{ image.filename }}" target="_blank">
-            <img src="/uploads/{{ image.filename }}" alt="{{ image.title or image.description }}" class="detail-image">
-        </a>
-    </div>
+<article class="image-detail">
+    <a href="/gallery" class="detail-back">&larr; 返回图库</a>
 
-    <div class="detail-info">
+    <div class="detail-head">
         <h1 class="detail-title">{{ image.title or '未命名' }}</h1>
         {% if image.description %}<p class="detail-desc">{{ image.description }}</p>{% endif %}
         <div class="detail-meta">
-            <span>上传者：{{ image|uploader_label }}</span>
-            <span>上传时间：{{ image.created_at[:10] }}</span>
-            <span>尺寸：{{ image.width }}x{{ image.height }}</span>
-            <span>大小：{{ (image.compressed_size / 1024)|round|int }}KB</span>
-            <span>浏览：{{ image.views }} 次</span>
+            <span>{{ image|uploader_label }}</span>
+            <span>{{ image.created_at[:10] }}</span>
+            <span>{{ image.width }} × {{ image.height }}</span>
+            <span>{{ (image.compressed_size / 1024)|round|int }} KB</span>
+            <span>{{ image.views }} 次浏览</span>
         </div>
     </div>
 
-    <div class="like-section">
-        <button class="like-btn {% if has_liked %}liked{% endif %}" id="likeBtn" data-image-id="{{ image.id }}">
-            <span class="like-icon">&#10084;</span>
+    <div class="detail-image-wrap">
+        <a href="/uploads/{{ image.filename }}" target="_blank" rel="noopener">
+            <img src="/uploads/{{ image.filename }}" alt="{{ image.title or image.description or '图片' }}"
+                 class="detail-image" decoding="async">
+        </a>
+    </div>
+
+    <div class="detail-actions like-section">
+        <button type="button" class="like-btn {% if has_liked %}liked{% endif %}" id="likeBtn"
+                data-image-id="{{ image.id }}" {% if has_liked %}title="每张图片只能点赞一次"{% endif %}>
+            <span class="like-icon" aria-hidden="true">&#10084;</span>
             <span class="like-text" id="likeText">{% if has_liked %}已赞{% else %}点赞{% endif %}</span>
-            <span class="like-count-num" id="likeCount">{{ likes_count }}</span>
+            <span class="like-count-num" id="likeCount" aria-live="polite">{{ likes_count }}</span>
         </button>
-        <button class="btn btn-primary random-btn" id="randomBtn" data-image-id="{{ image.id }}">下一张随机图片</button>
+        <button type="button" class="btn random-btn" id="randomBtn" data-image-id="{{ image.id }}">下一张随机图片</button>
     </div>
 
     {% if likes %}
-    <div class="like-list">
-        <h3>点赞列表</h3>
+    <section class="like-list">
+        <h3>最近点赞</h3>
         {% for like in likes %}
         <div class="like-item">
-            <span class="like-user">来自{{ like.province | location_label(like.city) }}的用户</span>
-            <span class="like-time">赞了这张图</span>
+            <span class="like-user">{{ like.province | location_label(like.city) }}的用户</span>
+            <span class="like-time">{{ like.created_at[:16] }}</span>
         </div>
         {% endfor %}
-    </div>
+    </section>
     {% endif %}
-</div>
+</article>
 {% endblock %}
 
 {% block scripts %}
 <script>
 (function() {
     const btn = document.getElementById('likeBtn');
+    const randomBtn = document.getElementById('randomBtn');
+
     if (btn) {
         btn.addEventListener('click', async function() {
-            if (btn.classList.contains('liked')) {
-                alert('您已经赞过这张图片了');
-                return;
-            }
+            if (btn.classList.contains('liked') || btn.disabled) return;
             btn.disabled = true;
             try {
                 const resp = await fetch('/api/like/' + btn.dataset.imageId, { method: 'POST' });
@@ -65,14 +68,13 @@
                 } else {
                     alert(data.error || '点赞失败');
                 }
-            } catch(e) {
+            } catch (e) {
                 alert('网络错误，请重试');
             }
             btn.disabled = false;
         });
     }
 
-    const randomBtn = document.getElementById('randomBtn');
     if (randomBtn) {
         randomBtn.addEventListener('click', async function() {
             randomBtn.disabled = true;
@@ -81,14 +83,13 @@
                 const data = await resp.json();
                 if (data.id) {
                     window.location.href = '/image/' + data.id;
-                } else {
-                    alert(data.error || '暂无更多图片');
-                    randomBtn.disabled = false;
+                    return;
                 }
-            } catch(e) {
+                alert(data.error || '暂无更多图片');
+            } catch (e) {
                 alert('网络错误，请重试');
-                randomBtn.disabled = false;
             }
+            randomBtn.disabled = false;
         });
     }
 })();
