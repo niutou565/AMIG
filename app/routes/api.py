@@ -4,9 +4,10 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 from app.models import (
-    insert_like, has_liked, get_approved_image_by_id,
-    increment_like_count, increment_daily_stat, today_str,
+    add_like_atomic, has_liked, get_approved_image_by_id,
+    count_likes_by_image,
     ua_hash, get_random_image_prefer_low_heat,
+    today_str,
 )
 from app.ip_geo import get_client_ip, get_ip_location
 from app.limiter import check_like_limit
@@ -70,17 +71,12 @@ async def like_image(request: Request, image_id: int):
     # 解析 IP 归属地
     province, city = await run_in_threadpool(get_ip_location, ip)
 
-    # 插入点赞
-    success = insert_like(image_id, ip, ua_hash_val, province, city)
+    # 插入点赞、图片计数、日统计在同一事务内原子完成，避免中途失败造成数据漂移
+    success = add_like_atomic(image_id, ip, ua_hash_val, province, city, today_str())
     if not success:
         return JSONResponse({"error": "您已经赞过这张图片了"}, status_code=400)
 
-    # 更新计数
-    increment_like_count(image_id)
-    increment_daily_stat(today_str(), "like_count")
-
     # 获取最新点赞数
-    from app.models import count_likes_by_image
     new_count = count_likes_by_image(image_id)
 
     return JSONResponse({

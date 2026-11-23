@@ -3,113 +3,171 @@
 
 {% block content %}
 <div class="upload-page">
-    <h1>上传图片</h1>
-    <p class="upload-hint">支持 JPG / PNG / WebP，单张不超过 10MB。提交后进入审核，通过后公开展示。</p>
+    <aside class="upload-aside">
+        <p class="eyebrow">投稿</p>
+        <h1>上传图片</h1>
+        <p class="upload-hint">提交后进入审核，通过后公开展示。请确认图片内容符合站规。</p>
+        <ul class="upload-specs">
+            <li><span>格式</span>JPG / PNG / WebP</li>
+            <li><span>大小</span>单张不超过 10MB</li>
+            <li><span>展示</span>审核通过后公开</li>
+        </ul>
+    </aside>
+
+    <div class="upload-main">
+    {% if success %}
+    <section class="upload-status" role="status">
+        <span class="status-icon" aria-hidden="true">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"></path></svg>
+        </span>
+        <h2 class="status-title">已提交审核</h2>
+        <p class="status-desc">{{ success }}</p>
+        <div class="status-actions">
+            <a href="/gallery" class="btn btn-primary">浏览图库</a>
+            <a href="/upload" class="btn">继续上传</a>
+        </div>
+    </section>
+    {% else %}
 
     {% if error %}
     <div class="alert alert-error" role="alert">{{ error }}</div>
-    {% endif %}
-    {% if success %}
-    <div class="alert alert-success" role="status">{{ success }}</div>
     {% endif %}
 
     <form action="/upload" method="post" enctype="multipart/form-data" class="upload-form" id="uploadForm">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 
         <!-- 蜜罐字段 -->
-        <div style="position:absolute;left:-9999px" aria-hidden="true">
+        <div class="honeypot-field" aria-hidden="true">
             <input type="text" name="honeypot" tabindex="-1" autocomplete="off">
         </div>
 
-        <div class="upload-dropzone" id="dropzone" role="button" tabindex="0"
-             aria-controls="fileInput" aria-describedby="fileHint">
-            <input type="file" name="image" id="fileInput" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
-                   style="display:none">
-            <span class="dropzone-inner" id="dropzoneContent">
-                <span class="dropzone-main">点击选择图片，或拖拽到此处</span>
-                <span class="dropzone-hint" id="fileHint">JPG / PNG / WebP，最大 10MB</span>
-            </span>
-        </div>
-        <p class="field-error" id="fileError" role="alert"></p>
-
-        <div class="upload-preview-wrap" id="previewWrap" hidden>
-            <img id="preview" class="upload-preview" alt="待上传图片预览">
-            <div class="upload-preview-meta">
-                <span class="file-name" id="fileName"></span>
-                <span id="fileSize"></span>
-                <button type="button" class="remove-file" id="removeFile">移除</button>
+        <section class="form-section">
+            <div class="form-section-head">
+                <span class="step">01</span>
+                <div>
+                    <h2>选择图片</h2>
+                    <p>JPG / PNG / WebP · 单张最大 10MB</p>
+                </div>
             </div>
-        </div>
 
-        <div class="form-group">
-            <label for="title">标题 <span class="required">*</span></label>
-            <input type="text" name="title" id="title" maxlength="100" required
-                   placeholder="给图片起一个标题">
-            <span class="char-count" id="titleCount">0/100</span>
-        </div>
+            <div class="upload-dropzone" id="dropzone" role="button" tabindex="0"
+                 aria-controls="fileInput" aria-describedby="fileHint">
+                <input type="file" name="image" id="fileInput" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+                       class="file-input-hidden">
+                <span class="dropzone-inner" id="dropzoneContent">
+                    <span class="dropzone-icon" aria-hidden="true">
+                        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                             stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><path d="m21 15-5-5L5 21"></path></svg>
+                    </span>
+                    <span class="dropzone-main">点击选择图片，或拖拽到此处</span>
+                    <span class="dropzone-hint" id="fileHint">一次只能上传一张图片</span>
+                </span>
+            </div>
+            <p class="field-error" id="fileError" role="alert"></p>
 
-        <div class="form-group">
-            <label for="description">简介（选填）</label>
-            <textarea name="description" id="description" rows="3" maxlength="200"
-                      placeholder="简单描述这张图片…"></textarea>
-            <span class="char-count" id="descCount">0/200</span>
-        </div>
+            <div class="upload-preview-wrap" id="previewWrap" hidden>
+                <img id="preview" class="upload-preview" alt="待上传图片预览">
+                <div class="upload-preview-meta">
+                    <span class="file-name" id="fileName"></span>
+                    <span id="fileSize"></span>
+                    <button type="button" class="remove-file" id="removeFile">移除</button>
+                </div>
+            </div>
+        </section>
 
-        {% if allow_author %}
-        <div class="form-group">
-            <label for="author">署名（选填）</label>
-            <input type="text" name="author" id="author" maxlength="30" placeholder="留空则显示为匿名用户">
-        </div>
-        {% endif %}
+        <section class="form-section">
+            <div class="form-section-head">
+                <span class="step">02</span>
+                <div>
+                    <h2>填写信息</h2>
+                    <p>标题为必填项，简介与署名选填</p>
+                </div>
+            </div>
 
-        {% if enable_captcha and turnstile_site_key %}
-        <div class="form-group">
-            <label>人机验证</label>
-            <div class="cf-turnstile" data-sitekey="{{ turnstile_site_key }}" data-theme="dark" data-callback="turnstileVerified" data-expired-callback="turnstileExpired" data-error-callback="turnstileError"></div>
-            <p class="form-hint" id="turnstileStatus" aria-live="polite">请完成人机验证后提交</p>
-        </div>
-        <script>
-        function turnstileVerified(token) {
-            var input = document.querySelector('input[name="cf-turnstile-response"]');
-            if (input) input.value = token;
-            document.getElementById('turnstileStatus').textContent = '人机验证完成';
-        }
-        function turnstileExpired() {
-            var input = document.querySelector('input[name="cf-turnstile-response"]');
-            if (input) input.value = '';
-            document.getElementById('turnstileStatus').textContent = '人机验证已过期，请重新验证';
-        }
-        function turnstileError() {
-            var input = document.querySelector('input[name="cf-turnstile-response"]');
-            if (input) input.value = '';
-            document.getElementById('turnstileStatus').textContent = '人机验证加载失败，请刷新页面重试';
-        }
-        </script>
-        <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
-        {% endif %}
+            <div class="form-group">
+                <label for="title">标题 <span class="required">*</span></label>
+                <input type="text" name="title" id="title" maxlength="100" required
+                       placeholder="给图片起一个标题">
+                <span class="char-count" id="titleCount">0/100</span>
+            </div>
 
-        <div class="form-group checkbox-group">
-            <label>
-                <input type="checkbox" name="agree" value="1" required>
-                <span>我已阅读并同意<a href="/page/rules" target="_blank" rel="noopener">站规</a></span>
-            </label>
-        </div>
+            <div class="form-group">
+                <label for="description">简介（选填）</label>
+                <textarea name="description" id="description" rows="3" maxlength="200"
+                          placeholder="简单描述这张图片…"></textarea>
+                <span class="char-count" id="descCount">0/200</span>
+            </div>
 
-        <div class="form-actions">
-            <button type="submit" class="btn btn-primary btn-full" id="submitBtn">提交上传</button>
-        </div>
+            {% if allow_author %}
+            <div class="form-group">
+                <label for="author">署名（选填）</label>
+                <input type="text" name="author" id="author" maxlength="30" placeholder="留空则显示为匿名用户">
+            </div>
+            {% endif %}
+        </section>
 
-        <div id="uploadProgress" class="upload-progress" hidden aria-live="polite">
-            <div class="upload-progress-track"><div id="uploadProgressBar" class="upload-progress-bar"></div></div>
-            <span id="uploadProgressText">准备上传 0%</span>
-            <button type="button" class="cancel-upload" id="cancelUpload" hidden>取消上传</button>
-        </div>
+        <section class="form-section">
+            <div class="form-section-head">
+                <span class="step">03</span>
+                <div>
+                    <h2>确认并提交</h2>
+                    <p>请确认图片内容符合站规</p>
+                </div>
+            </div>
+
+            {% if enable_captcha and turnstile_site_key %}
+            <div class="form-group">
+                <label>人机验证</label>
+                <div class="cf-turnstile" data-sitekey="{{ turnstile_site_key }}" data-theme="dark" data-csp-nonce="{{ request.state.csp_nonce }}" data-callback="turnstileVerified" data-expired-callback="turnstileExpired" data-error-callback="turnstileError"></div>
+                <p class="form-hint" id="turnstileStatus" aria-live="polite">请完成人机验证后提交</p>
+            </div>
+            <script nonce="{{ request.state.csp_nonce }}">
+            function turnstileVerified(token) {
+                var input = document.querySelector('input[name="cf-turnstile-response"]');
+                if (input) input.value = token;
+                document.getElementById('turnstileStatus').textContent = '人机验证完成';
+            }
+            function turnstileExpired() {
+                var input = document.querySelector('input[name="cf-turnstile-response"]');
+                if (input) input.value = '';
+                document.getElementById('turnstileStatus').textContent = '人机验证已过期，请重新验证';
+            }
+            function turnstileError() {
+                var input = document.querySelector('input[name="cf-turnstile-response"]');
+                if (input) input.value = '';
+                document.getElementById('turnstileStatus').textContent = '人机验证加载失败，请刷新页面重试';
+            }
+            </script>
+            <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+            {% endif %}
+
+            <div class="form-group checkbox-group">
+                <label>
+                    <input type="checkbox" name="agree" value="1" required>
+                    <span>我已阅读并同意<a href="/page/rules" target="_blank" rel="noopener">站规</a></span>
+                </label>
+            </div>
+
+            <div class="form-actions">
+                <button type="submit" class="btn btn-primary btn-full" id="submitBtn">提交上传</button>
+            </div>
+
+            <div id="uploadProgress" class="upload-progress" hidden aria-live="polite">
+                <progress id="uploadProgressBar" class="upload-progress-bar" max="100" value="0" aria-label="上传进度">0%</progress>
+                <span id="uploadProgressText">准备上传 0%</span>
+                <button type="button" class="cancel-upload" id="cancelUpload" hidden>取消上传</button>
+            </div>
+        </section>
     </form>
+    {% endif %}
+    </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
-<script>
+{% if not success %}
+<script nonce="{{ request.state.csp_nonce }}">
 (function() {
     var MAX_SIZE = 10 * 1024 * 1024;
     var dropzone = document.getElementById('dropzone');
@@ -273,6 +331,31 @@
         xhr = null;
     }
 
+    function renderSuccessPage(html) {
+        try {
+            var parsed = new DOMParser().parseFromString(html, 'text/html');
+            if (!parsed.querySelector('.upload-status')) return false;
+            var newMain = parsed.getElementById('main');
+            var currentMain = document.getElementById('main');
+            if (!newMain || !currentMain) return false;
+            currentMain.replaceWith(document.importNode(newMain, true));
+            window.scrollTo(0, 0);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function responseErrorMessage(html) {
+        try {
+            var parsed = new DOMParser().parseFromString(html, 'text/html');
+            var alert = parsed.querySelector('.alert-error');
+            return alert ? alert.textContent.trim() : '';
+        } catch (e) {
+            return '';
+        }
+    }
+
     cancelUpload.addEventListener('click', function() {
         if (xhr) {
             xhr.abort();
@@ -290,7 +373,7 @@
         }
         var turnstileInput = document.querySelector('input[name="cf-turnstile-response"]');
         if (document.querySelector('.cf-turnstile') && (!turnstileInput || !turnstileInput.value)) {
-            alert('请先完成人机验证');
+            amigToast('请先完成人机验证', 'error');
             return;
         }
         if (!form.checkValidity()) {
@@ -304,7 +387,7 @@
         submitBtn.textContent = '上传中…';
         progress.hidden = false;
         progress.classList.remove('is-error');
-        progressBar.style.width = '0%';
+        progressBar.value = 0;
         progressText.textContent = '准备上传 0%';
         cancelUpload.hidden = false;
 
@@ -315,15 +398,26 @@
         xhr.upload.addEventListener('progress', function(event) {
             if (!event.lengthComputable) return;
             var percent = Math.min(100, Math.round(event.loaded / event.total * 100));
-            progressBar.style.width = percent + '%';
+            progressBar.value = percent;
             progressText.textContent = '上传中 ' + percent + '%';
         });
 
         xhr.onload = function() {
             if (xhr.status >= 200 && xhr.status < 400) {
-                progressBar.style.width = '100%';
+                progressBar.value = 100;
                 progressText.textContent = '上传完成，正在处理图片…';
                 cancelUpload.hidden = true;
+                if (renderSuccessPage(xhr.responseText)) {
+                    return;
+                }
+                var message = responseErrorMessage(xhr.responseText);
+                if (message) {
+                    progress.classList.add('is-error');
+                    progressText.textContent = message;
+                    resetSubmitUI();
+                    if (window.turnstile) turnstile.reset();
+                    return;
+                }
                 document.open();
                 document.write(xhr.responseText);
                 document.close();
@@ -351,7 +445,7 @@
 
         xhr.onabort = function() {
             progressText.textContent = '已取消上传';
-            progressBar.style.width = '0%';
+            progressBar.value = 0;
             resetSubmitUI();
             if (window.turnstile) turnstile.reset();
         };
@@ -360,4 +454,5 @@
     });
 })();
 </script>
+{% endif %}
 {% endblock %}

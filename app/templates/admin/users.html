@@ -5,7 +5,8 @@
 <h1>用户 / IP 管理</h1>
 
 <h3>封禁管理</h3>
-<form method="post" action="/admin/users/ban" class="form-inline">
+<form method="post" action="/admin/users/ban" class="form-inline"
+      data-confirm="确定封禁该目标？封禁后该 IP / 网段 / UA 将无法继续上传。">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <select name="ban_type" required aria-label="封禁类型">
         <option value="single">单个 IP</option>
@@ -32,7 +33,12 @@
         <tbody>
             {% for ban in bans %}
             <tr>
-                <td>{{ ban.type }}</td>
+                <td>
+                    {% if ban.type == 'single' %}单个 IP
+                    {% elif ban.type == 'cidr' %}IP 段
+                    {% elif ban.type == 'ua' %}UA 指纹
+                    {% else %}{{ ban.type }}{% endif %}
+                </td>
                 <td>{{ ban.target }}</td>
                 <td>{{ ban.reason }}</td>
                 <td class="log-time">{{ ban.created_at[:10] }}</td>

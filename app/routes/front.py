@@ -6,11 +6,11 @@ from starlette.concurrency import run_in_threadpool
 from app.config import BASE_DIR, MAX_DESC_LENGTH, MAX_TITLE_LENGTH, MAX_AUTHOR_LENGTH, GALLERY_PER_PAGE, MAX_UPLOAD_SIZE
 from app.models import (
     get_random_approved_images, get_latest_approved_images,
-    search_approved_images, count_search_approved_images,
+    search_approved_images, count_search_approved_images, normalize_search_query,
     get_approved_image_by_id, get_images_by_status, count_images_by_status,
     get_likes_by_image, count_likes_by_image, has_liked,
     insert_image, get_visible_pages, get_visible_links,
-    get_page_by_slug, get_setting, get_setting_int,
+    get_page_by_slug, get_setting,
     count_images_admin,
     check_content_md5_duplicate,
     now_iso, ua_hash, generate_filename,
@@ -21,7 +21,8 @@ from app.stats import get_top_cached
 from app.ip_geo import get_client_ip, get_ip_location, get_ip_region
 from app.limiter import check_upload_limit
 from app.ban import check_ban_status
-from app.image_utils import validate_image, process_image, delete_image_files
+from app import image_utils as image_utils_module
+from app.image_utils import validate_image, process_image
 from app.middleware import check_sensitive
 from app.display import location_label, uploader_label, safe_color
 import logging
@@ -39,13 +40,29 @@ templates.env.filters["safe_color"] = safe_color
 _upload_semaphore = threading.Semaphore(4)
 
 
+def _safe_int(value, default):
+    """解析 settings 中的数字，非法值回退默认值。"""
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
 def _process_image_limited(file_data, watermark_text, author, uploaded_at):
     with _upload_semaphore:
-        return process_image(file_data, watermark_text, author, uploaded_at)
+        return process_image(
+            file_data, watermark_text, author, uploaded_at,
+            target_dir=image_utils_module.PRIVATE_UPLOADS_DIR,
+        )
+
+
+def _validate_image_limited(file_data, filename, content_type):
+    with _upload_semaphore:
+        return validate_image(file_data, filename, content_type)
 
 
 def get_settings_context():
-    """获取站点设置上下文"""
+    """获取站点设置上下文（一次读取 settings 表，供页面与上传流程复用）。"""
     from app.models import get_all_settings
     settings = get_all_settings()
     return {
@@ -55,10 +72,14 @@ def get_settings_context():
         "logo_small": settings.get("logo_small", ""),
         "footer_icp": settings.get("footer_icp", ""),
         "footer_copyright": settings.get("footer_copyright", ""),
-        "accent_color": settings.get("theme_accent_color", "#6c5ce7"),
+        "accent_color": settings.get("theme_accent_color", "#c9a063"),
         "allow_author": settings.get("allow_author", "1") == "1",
         "enable_captcha": settings.get("enable_captcha", "0") == "1",
+        "enable_dedup": settings.get("enable_dedup", "1") == "1",
         "turnstile_site_key": settings.get("turnstile_site_key", ""),
+        "watermark_text": settings.get("watermark_text", "").strip(),
+        "top_window_days": settings.get("top_window_days", "30"),
+        "top_show_count": settings.get("top_show_count", "12"),
     }
 
 
@@ -113,7 +134,11 @@ async def index(request: Request):
     ctx = get_common_context(request)
     ctx["random_images"] = get_random_approved_images(12)
     ctx["latest_images"] = get_latest_approved_images(12)
-    ctx["top_images"] = get_top_cached(12)
+    ctx["top_images"] = get_top_cached(
+        12,
+        window_days=_safe_int(ctx["top_window_days"], 30),
+        show_count=_safe_int(ctx["top_show_count"], 12),
+    )
     return templates.TemplateResponse(request, "index.html", ctx)
 
 
@@ -122,7 +147,8 @@ async def index(request: Request):
 @router.get("/gallery", response_class=HTMLResponse)
 async def gallery(request: Request, q: str = "", page: int = 1, sort: str = "latest"):
     ctx = get_common_context(request)
-    offset = (page - 1) * GALLERY_PER_PAGE
+    # 关键词先规范化：空白关键词按“无搜索”处理，避免用一串空格去匹配
+    q = normalize_search_query(q)
     sort_order_map = {
         "hot": "like_count DESC",
         "latest": "created_at DESC",
@@ -130,18 +156,26 @@ async def gallery(request: Request, q: str = "", page: int = 1, sort: str = "lat
     }
     order_by = sort_order_map.get(sort, "created_at DESC")
 
+    # 先统计总数再夹取页码：page 超出范围时回落到最后一页，
+    # 避免结果明明存在却显示“没有找到”
     if q:
-        images = search_approved_images(q, GALLERY_PER_PAGE, offset)
         total = count_search_approved_images(q)
     else:
-        images = get_images_by_status("approved", GALLERY_PER_PAGE, offset, order_by)
         total = count_images_by_status("approved")
+    total_pages = max(1, (total + GALLERY_PER_PAGE - 1) // GALLERY_PER_PAGE)
+    page = min(max(1, page), total_pages)
+    offset = (page - 1) * GALLERY_PER_PAGE
+
+    if q:
+        images = search_approved_images(q, GALLERY_PER_PAGE, offset)
+    else:
+        images = get_images_by_status("approved", GALLERY_PER_PAGE, offset, order_by)
     ctx["images"] = images
     ctx["query"] = q
     ctx["sort"] = sort
     ctx["page"] = page
     ctx["total"] = total
-    ctx["total_pages"] = max(1, (total + GALLERY_PER_PAGE - 1) // GALLERY_PER_PAGE)
+    ctx["total_pages"] = total_pages
     return templates.TemplateResponse(request, "gallery.html", ctx)
 
 
@@ -150,8 +184,9 @@ async def gallery(request: Request, q: str = "", page: int = 1, sort: str = "lat
 @router.get("/top", response_class=HTMLResponse)
 async def top_list(request: Request, page: int = 1):
     ctx = get_common_context(request)
-    window_days = get_setting_int("top_window_days", 30)
-    show_count = get_setting_int("top_show_count", 12)
+    page = max(1, page)
+    window_days = _safe_int(ctx["top_window_days"], 30)
+    show_count = _safe_int(ctx["top_show_count"], 12)
     from app.config import TOP_PER_PAGE
     offset = (page - 1) * TOP_PER_PAGE
     from app.models import get_top_images, count_top_images
@@ -196,11 +231,8 @@ async def image_detail(request: Request, image_id: int):
 # ========== 上传页 ==========
 
 def _prepare_upload_context(request: Request):
-    """构建上传页上下文（含 Turnstile 站点密钥）"""
-    ctx = get_common_context(request)
-    ctx["enable_captcha"] = get_setting("enable_captcha", "0") == "1"
-    ctx["turnstile_site_key"] = get_setting("turnstile_site_key", "")
-    return ctx
+    """构建上传页上下文（设置已由 get_common_context 一次读取，不再重复查库）。"""
+    return get_common_context(request)
 
 
 @router.get("/upload", response_class=HTMLResponse)
@@ -236,9 +268,9 @@ async def upload_action(
     if agree != "1":
         return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "请先阅读并同意站规"})
 
-    # 人机验证（Cloudflare Turnstile）
+    # 人机验证（Cloudflare Turnstile）；开关来自本次请求已读取的 settings
     ip = get_client_ip(request)
-    if get_setting("enable_captcha", "0") == "1":
+    if ctx["enable_captcha"]:
         verified, captcha_error = await verify_turnstile(turnstile_response.strip(), ip)
         if not verified:
             return templates.TemplateResponse(request, "upload.html", {**ctx, "error": captcha_error})
@@ -247,7 +279,7 @@ async def upload_action(
     title = title.strip()[:MAX_TITLE_LENGTH]
     description = description.strip()[:MAX_DESC_LENGTH]
     author = author.strip()[:MAX_AUTHOR_LENGTH]
-    if not get_setting("allow_author", "1") == "1":
+    if not ctx["allow_author"]:
         author = ""
 
     if not title:
@@ -289,14 +321,19 @@ async def upload_action(
         return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "请选择图片文件"})
     file_data = bytes(file_data)
 
-    # 验证图片
-    valid, err_msg = validate_image(file_data, image.filename or "unknown.jpg")
+    # 验证图片（包含解码校验，放到线程池，避免阻塞异步事件循环）
+    valid, err_msg = await run_in_threadpool(
+        _validate_image_limited,
+        file_data,
+        image.filename or "unknown.jpg",
+        getattr(image, "content_type", None),
+    )
     if not valid:
         return templates.TemplateResponse(request, "upload.html", {**ctx, "error": err_msg})
 
     # 处理图片（在独立线程池中执行，避免阻塞事件循环；并发受信号量限制）
     uploaded_at = now_iso()
-    watermark_text = get_setting("watermark_text", "").strip()
+    watermark_text = ctx["watermark_text"]
     result, err_msg = await run_in_threadpool(
         _process_image_limited, file_data, watermark_text, author, uploaded_at
     )
@@ -307,7 +344,7 @@ async def upload_action(
     saved = False
     try:
         # 图片去重
-        if get_setting("enable_dedup", "1") == "1":
+        if ctx["enable_dedup"]:
             is_dup = check_content_md5_duplicate(result["content_md5"], ip)
             if is_dup:
                 from app.models import insert_image
@@ -358,7 +395,10 @@ async def upload_action(
         })
     finally:
         if not saved:
-            delete_image_files(result["filename"], result["thumb_filename"])
+            image_utils_module.delete_image_files(
+                result["filename"], result["thumb_filename"],
+                uploads_dir=image_utils_module.PRIVATE_UPLOADS_DIR,
+            )
 
 
 # ========== 自定义页面 ==========

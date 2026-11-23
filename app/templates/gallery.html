@@ -3,47 +3,66 @@
 {% block title %}图库 - {{ site_name }}{% endblock %}
 
 {% block content %}
-<div class="page-header">
-    <h1>图库</h1>
-    <div class="gallery-toolbar">
-        <form action="/gallery" method="get" class="search-form-inline" role="search">
-            <input type="text" name="q" placeholder="搜索标题、简介或署名…" value="{{ query }}"
-                   class="search-input" aria-label="搜索图片">
-            <button type="submit" class="search-btn">搜索</button>
-        </form>
-        {% if not query %}
-        <form action="/gallery" method="get" class="sort-form">
-            <select name="sort" aria-label="排序方式" onchange="this.form.submit()">
-                <option value="hot" {% if sort == 'hot' %}selected{% endif %}>按热度排序</option>
-                <option value="latest" {% if sort != 'hot' and sort != 'oldest' %}selected{% endif %}>按最新上传排序</option>
-                <option value="oldest" {% if sort == 'oldest' %}selected{% endif %}>按最早上传排序</option>
-            </select>
-        </form>
-        {% endif %}
+<header class="page-head">
+    <div class="page-head-text">
+        <h1>图库</h1>
+        <p class="page-subtitle">
+            {% if query %}「{{ query }}」的搜索结果 · 共 {{ total }} 张结果 · <a href="/gallery" class="subtitle-link">清除搜索</a>
+            {% else %}共 {{ total }} 张公开图片{% endif %}
+        </p>
     </div>
+</header>
+
+<div class="filter-bar">
+    <form action="/gallery" method="get" class="search-form" role="search">
+        <div class="search-field">
+            <span class="search-icon" aria-hidden="true">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.6-3.6"></path></svg>
+            </span>
+            <input type="text" name="q" placeholder="搜索标题、简介或署名（空格分隔多个关键词）…" value="{{ query }}"
+                   class="search-input" aria-label="搜索图片">
+        </div>
+        <button type="submit" class="search-btn">搜索</button>
+    </form>
+    {% if not query %}
+    <div class="segmented" role="group" aria-label="排序方式">
+        <a href="/gallery?sort=latest" class="seg {% if sort != 'hot' and sort != 'oldest' %}is-active{% endif %}"
+           {% if sort != 'hot' and sort != 'oldest' %}aria-current="true"{% endif %}>最新</a>
+        <a href="/gallery?sort=hot" class="seg {% if sort == 'hot' %}is-active{% endif %}"
+           {% if sort == 'hot' %}aria-current="true"{% endif %}>热度</a>
+        <a href="/gallery?sort=oldest" class="seg {% if sort == 'oldest' %}is-active{% endif %}"
+           {% if sort == 'oldest' %}aria-current="true"{% endif %}>最早</a>
+    </div>
+    {% endif %}
 </div>
 
 {% if query %}
-<p class="search-result-info">
-    搜索「{{ query }}」共 {{ total }} 张结果 · <a href="/gallery">清除搜索</a>
-</p>
+<p class="search-result-info">搜索结果按相关度排序</p>
 {% endif %}
 
 {% if images %}
 <div class="image-grid">
     {% for img in images %}
-    {{ image_card(img) }}
+    {{ image_card(img, lazy=(loop.index > 4)) }}
     {% endfor %}
 </div>
 
+{% set pager_numbers = true %}
 {% include "components/pagination.html" %}
 {% else %}
 <div class="empty-state">
+    <span class="empty-icon" aria-hidden="true">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.5" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.6-3.6"></path></svg>
+    </span>
     {% if query %}
-    <p>没有找到与「{{ query }}」相关的图片</p>
+    <p class="empty-title">没有找到与「{{ query }}」相关的图片</p>
+    <p>试试更换关键词，或减少搜索词的数量。</p>
     <a href="/gallery" class="btn">返回全部图片</a>
     {% else %}
-    <p>图库还没有图片</p>
+    <p class="empty-title">图库还没有图片</p>
+    <p>上传的图片会在审核通过后展示在这里。</p>
     <a href="/upload" class="btn btn-primary">上传第一张图片</a>
     {% endif %}
 </div>

@@ -5,17 +5,19 @@
 <h1>友情链接</h1>
 
 <h3>新增 / 编辑</h3>
-<form method="post" action="/admin/links/save" class="form-inline">
+<p class="form-hint" id="linkEditHint" hidden>正在编辑已有链接，保存后会覆盖原记录。</p>
+<form method="post" action="/admin/links/save" class="form-inline" id="linkForm">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <input type="hidden" name="link_id" id="editLinkId">
     <input type="text" name="name" id="editName" placeholder="名称" required aria-label="链接名称">
     <input type="url" name="url" id="editUrl" placeholder="https://example.com" required aria-label="链接地址">
-    <input type="number" name="sort_order" id="editSort" value="0" placeholder="排序" style="width:88px" aria-label="排序">
+    <input type="number" name="sort_order" id="editSort" value="0" placeholder="排序" class="w-88" aria-label="排序">
     <select name="is_visible" id="editVisible" aria-label="是否显示">
         <option value="1">显示</option>
         <option value="0">隐藏</option>
     </select>
     <button type="submit" class="btn btn-primary">保存</button>
+    <button type="button" class="btn" id="cancelLinkEdit" hidden>取消编辑</button>
 </form>
 
 <h3>列表</h3>
@@ -53,7 +55,7 @@
                                 data-link-sort="{{ link.sort_order }}"
                                 data-link-visible="{{ link.is_visible }}">编辑</button>
                         <form method="post" action="/admin/links/delete/{{ link.id }}"
-                              onsubmit="return confirm('确定删除该友情链接？')">
+                              data-confirm="确定删除该友情链接？">
                             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                             <button type="submit" class="btn btn-sm btn-danger">删除</button>
                         </form>
@@ -70,7 +72,17 @@
 {% endblock %}
 
 {% block scripts %}
-<script>
+<script nonce="{{ request.state.csp_nonce }}">
+var linkForm = document.getElementById('linkForm');
+var editHint = document.getElementById('linkEditHint');
+var cancelEdit = document.getElementById('cancelLinkEdit');
+
+function setEditing(on) {
+    editHint.hidden = !on;
+    cancelEdit.hidden = !on;
+    if (!on && linkForm) linkForm.reset();
+}
+
 document.querySelectorAll('.edit-link-btn').forEach(function (btn) {
     btn.addEventListener('click', function () {
         var data = btn.dataset;
@@ -79,8 +91,13 @@ document.querySelectorAll('.edit-link-btn').forEach(function (btn) {
         document.getElementById('editUrl').value = data.linkUrl;
         document.getElementById('editSort').value = data.linkSort;
         document.getElementById('editVisible').value = data.linkVisible;
+        setEditing(true);
         document.getElementById('editName').focus();
     });
+});
+cancelEdit?.addEventListener('click', function () {
+    setEditing(false);
+    document.getElementById('editName').focus();
 });
 </script>
 {% endblock %}

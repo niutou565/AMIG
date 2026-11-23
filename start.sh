@@ -8,8 +8,18 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PORT="${PORT:-8000}"
+WORKERS="${WORKERS:-1}"
 PROJECT_URL="http://127.0.0.1:${PORT}"
 VENV_DIR="$SCRIPT_DIR/venv"
+
+if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+    echo "[ERROR] PORT must be an integer between 1 and 65535 (current: $PORT)"
+    exit 1
+fi
+if ! [[ "$WORKERS" =~ ^[0-9]+$ ]] || [ "$WORKERS" -lt 1 ]; then
+    echo "[ERROR] WORKERS must be a positive integer (current: $WORKERS)"
+    exit 1
+fi
 
 echo ""
 echo "  =========================================="
@@ -113,7 +123,8 @@ fi
 echo ""
 echo "[*] Starting web server..."
 echo "    URL: $PROJECT_URL"
+echo "    Workers: $WORKERS"
 echo "    Press Ctrl+C to stop"
 echo ""
 cd "$SCRIPT_DIR"
-exec python -m uvicorn app.main:app --host 127.0.0.1 --port "$PORT" --workers 1 --log-level info
+exec python -m uvicorn app.main:app --host 127.0.0.1 --port "$PORT" --workers "$WORKERS" --log-level info

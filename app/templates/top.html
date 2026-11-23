@@ -2,22 +2,24 @@
 {% block title %}热度榜 - {{ site_name }}{% endblock %}
 
 {% block content %}
-<div class="page-header">
-    <div>
+<header class="page-head">
+    <div class="page-head-text">
         <h1>热度榜</h1>
-        <p class="page-subtitle">近 {{ window_days }} 天内点赞最多的图片</p>
+        <p class="page-subtitle">近 {{ window_days }} 天内点赞最多的图片 · 共 {{ total }} 张</p>
     </div>
-</div>
+</header>
 
 {% if images %}
-<div class="top-list">
+<div class="top-list top-list--two-col">
     {% for img in images %}
     {% set card_text = img.title or '未命名' %}
     {% set rank = loop.index + (page - 1) * 24 %}
     <a href="/image/{{ img.id }}" class="top-item">
         <span class="top-rank {% if rank == 1 %}gold{% elif rank == 2 %}silver{% elif rank == 3 %}bronze{% endif %}">{{ rank }}</span>
         <span class="top-thumb">
-            <img src="/uploads/{{ img.thumb_filename }}" alt="{{ card_text }}" loading="lazy" decoding="async">
+            <img src="/uploads/{{ img.thumb_filename }}" alt="{{ card_text }}"
+                 width="{{ img.width }}" height="{{ img.height }}"
+                 {% if loop.index > 4 %}loading="lazy"{% endif %} decoding="async">
         </span>
         <span class="top-info">
             <span class="top-desc">{{ card_text }}</span>
@@ -28,10 +30,16 @@
     {% endfor %}
 </div>
 
+{% set pager_numbers = true %}
 {% include "components/pagination.html" %}
 {% else %}
 <div class="empty-state">
-    <p>暂无热度数据</p>
+    <span class="empty-icon" aria-hidden="true">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"></path><path d="m7 10 5 5 5-5"></path><path d="M5 21h14"></path></svg>
+    </span>
+    <p class="empty-title">暂无热度数据</p>
+    <p>近 {{ window_days }} 天内还没有产生点赞，先去图库看看吧。</p>
     <a href="/gallery" class="btn">浏览图库</a>
 </div>
 {% endif %}

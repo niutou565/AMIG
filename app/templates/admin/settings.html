@@ -4,7 +4,6 @@
 {% block content %}
 <h1>站点设置</h1>
 
-{% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
 <form method="post" action="/admin/settings" enctype="multipart/form-data" class="settings-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 
@@ -47,8 +46,8 @@
     <h3>外观</h3>
     <div class="form-group">
         <label>主题强调色</label>
-        <input type="color" name="theme_accent_color" value="{{ settings.get('theme_accent_color', '#6c5ce7') }}">
-        <span class="color-value">{{ settings.get('theme_accent_color', '#6c5ce7') }}</span>
+        <input type="color" name="theme_accent_color" value="{{ settings.get('theme_accent_color', '#c9a063') }}">
+        <span class="color-value">{{ settings.get('theme_accent_color', '#c9a063') }}</span>
     </div>
 
     <h3>管理域名 <span class="heading-note">（保存后立即生效，旧域名立刻失效）</span></h3>
@@ -138,7 +137,7 @@
 {% endblock %}
 
 {% block scripts %}
-<script>
+<script nonce="{{ request.state.csp_nonce }}">
 (function () {
     var oldRaw = {{ settings.get('admin_domain', '') | tojson }};
     function normalizeList(value) {

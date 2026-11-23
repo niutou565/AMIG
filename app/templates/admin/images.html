@@ -4,9 +4,13 @@
 {% block content %}
 <h1>图片管理</h1>
 
+<p class="search-result-info">
+    {% if query %}搜索「{{ query }}」找到 {{ total }} 张图片{% else %}共 {{ total }} 张图片{% endif %}
+</p>
+
 <div class="toolbar">
     <form class="toolbar-search" method="get" action="/admin/images" role="search">
-        <select name="sort" aria-label="排序方式" onchange="this.form.submit()">
+        <select name="sort" aria-label="排序方式" data-auto-submit>
             <option value="created_at_desc" {% if sort == 'created_at_desc' %}selected{% endif %}>时间倒序</option>
             <option value="like_count_desc" {% if sort == 'like_count_desc' %}selected{% endif %}>点赞数倒序</option>
             <option value="views_desc" {% if sort == 'views_desc' %}selected{% endif %}>浏览数倒序</option>
@@ -38,7 +42,7 @@
                 <td>{{ img.id }}</td>
                 <td><img src="/uploads/{{ img.thumb_filename }}" class="table-thumb" alt="" loading="lazy"></td>
                 <td>{{ img.title or '-' }}</td>
-                <td>{{ img.description[:40] or '-' }}</td>
+                <td>{{ (img.description or '')[:40] or '-' }}</td>
                 <td>
                     {% if img.status == 'pending' %}
                     <span class="status-badge status-pending">待审核</span>
@@ -55,7 +59,7 @@
                     <div class="row-actions">
                         <a href="/admin/images/{{ img.id }}" class="btn btn-sm">详情</a>
                         <form method="post" action="/admin/images/{{ img.id }}/delete"
-                              onsubmit="return confirm('确定删除该图片？将同时删除图片文件，且不可恢复。')">
+                              data-confirm="确定删除该图片？将同时删除图片文件，且不可恢复。">
                             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                             <button type="submit" class="btn btn-sm btn-danger">删除</button>
                         </form>
@@ -64,7 +68,9 @@
             </tr>
             {% else %}
             <tr>
-                <td colspan="9">暂无图片</td>
+                <td colspan="9">
+                    {% if query %}没有找到匹配的图片，<a href="/admin/images">清除搜索</a>{% else %}暂无图片{% endif %}
+                </td>
             </tr>
             {% endfor %}
         </tbody>

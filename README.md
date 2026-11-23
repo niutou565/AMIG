@@ -1,6 +1,6 @@
 # AMIG · Anonymous Moderated Image Gallery（匿名图片分享站）
 
-一个轻量级的匿名图片分享社区：前台匿名上传/浏览/点赞，后台管理员审核与管理，全站暗色主题，采用双域名架构隔离前后台。当前发布版本为 1.0.10；1.0.5 已被 1.0.7 替代，属于不可用版本。
+一个轻量级的匿名图片分享社区：前台匿名上传/浏览/点赞，后台管理员审核与管理，全站暗色主题，采用双域名架构隔离前后台。当前发布版本为 1.1.0；1.0.5 已被 1.0.7 替代，属于不可用版本。
 
 ---
 
@@ -42,18 +42,95 @@
 | 图库 | 浏览所有已通过图片，支持关键词搜索与分页 |
 | 热度榜 | 按时间窗口内点赞数排行，窗口天数后台可配 |
 | 图片详情 | 查看大图、点赞、浏览计数（同 IP 10 分钟内去重）、上一张/下一张导航 |
-| 匿名上传 | 支持 JPG/PNG/WebP，自动 WebP 重编码、剥离 EXIF、添加可配置水印、生成缩略图，并显示实时上传进度 |
+| 匿名上传 | 支持 JPG/PNG/WebP（单帧；不支持 GIF/SVG/动图），自动 WebP 重编码、保留透明通道、剥离 EXIF、添加可配置水印、生成缩略图，并显示实时上传进度 |
 | 自定义页面 | 「关于」「站规」「版权」等内容页，后台可编辑（内容按纯文本安全渲染） |
 | 友情链接 | 页脚展示，后台可管理 |
 
 ### 图片上传处理流程
 
 1. 前端校验：文件类型（JPG/PNG/WebP）与大小（≤10MB），并读取文件头魔数确认真实格式；显示上传进度，支持取消、超时提示与失败重试，提交时防止重复点击
-2. 后端校验：扩展名 + 文件魔数（magic bytes）双重校验，防止伪造后缀
-3. 安全处理：剥离 EXIF、严格校验总像素数（超限直接拒绝，防解压炸弹）、最长边缩放至 1920px、转 WebP、生成缩略图
+2. 后端校验：扩展名 + 声明 Content-Type + 文件魔数 + Pillow 实际解码四层校验，防止伪造后缀、损坏图片与动图
+3. 安全处理：剥离 EXIF（含 GPS/方向元数据）；严格校验总像素数（超限直接拒绝，防解压炸弹）；最长边缩放至 1920px、转 WebP（透明图保留 Alpha）、生成缩略图
 4. 水印处理：使用项目内置的 Noto Sans SC 字体（SIL OFL 1.1），左下角添加后台自定义文字，右下角添加上传者和上传时间；根据横竖图和图片尺寸自动调整字号、边距、换行与位置，水印半透明合成，不遮挡图片主体
 5. 内容去重：计算 MD5，同 IP 24 小时 / 全站 30 天内重复则标记「疑似重复」
 6. 入库为 `pending` 状态，等待管理员审核
+
+### 图片文件访问与历史数据
+
+- 已审核通过：原图与缩略图存放在 `uploads/YYYY/MM/`，可公开访问（`/uploads/...`），使用 ETag/304、Range（206）与 `public, no-cache` 缓存。
+- 待审核 / 已拒绝：新上传文件物理存放在 `private_uploads/YYYY/MM/`，普通访客访问返回 404；仅已登录管理员在管理域名下可预览，响应 `private, no-store` 且禁止索引。审核通过时应用会把原图与缩略图移动到 `uploads/`；移动失败则回滚为待审核并记录日志。
+- Logo（`logo_large_*` / `logo_small_*`）属于公开文件；临时文件、孤立文件、未知路径、路径穿越与符号链接一律 404。
+- 升级兼容：旧数据库中已通过图片无需迁移即可继续访问；旧待审/已拒绝文件仍留在 `uploads/` 时，访问层仍会按状态拒绝公开访问，但建议执行下面的迁移工具把它们移入私有目录，消除 Web 服务器误配静态直发造成的泄露风险。
+- 反向代理不得为 `/uploads` 或 `private_uploads` 配置 `alias`/`root` 静态直发，必须交给应用鉴权。
+
+### 待审图片迁移到私有目录（升级后执行一次）
+
+```bash
+python tools/migrate_private_uploads.py            # 预演：只输出待移动文件
+python tools/migrate_private_uploads.py --apply    # 真正移动 pending/rejected 文件
+```
+
+迁移是幂等的：已在私有目录的文件会跳过；公开与私有目录同时存在同名文件时拒绝覆盖并报告冲突。迁移只移动文件，不修改数据库记录。
+
+### 上传目录一致性检查
+
+```bash
+python tools/check_uploads.py                      # 只读检查（同时扫描 uploads/ 与 private_uploads/）
+python tools/check_uploads.py --older-than-days 7  # 标记 7 天前的孤儿文件
+python tools/check_uploads.py --fix-misplaced      # 修复状态与目录不一致的文件（只移动，不删除）
+python tools/check_uploads.py --delete-orphans     # 删除符合条件的孤儿文件
+python tools/check_uploads.py --delete-temp        # 删除超过安全期限的 .tmp
+```
+
+工具只删除“没有任何数据库记录引用且超过安全期限”的文件；数据库有记录但文件缺失只报告，不会自动删除记录；临时文件需要显式 `--delete-temp`；`--fix-misplaced` 只把被数据库引用但放错目录的图片（原图+缩略图整体）移动到状态期望的目录，移动失败自动回滚。建议在低峰期通过 cron 定期执行只读检查，清理操作始终由人工确认后显式执行。
+
+### 数据备份与恢复
+
+备份使用 SQLite Online Backup API 在 WAL 模式下取得一致性快照，**不是直接复制正在运行的 `.db` 文件**；数据库与 `uploads/`、`private_uploads/` 打包为同名配对文件。
+
+```bash
+# 创建备份（数据库 + 图片，推荐）
+python tools/backup_db.py --with-uploads
+
+# 查看备份（标记 [含上传归档] 的备份可连同图片一起恢复）
+python tools/restore_db.py --list
+
+# 校验备份：integrity_check + 外键 + 关键表 + 归档是否包含数据库引用的全部图片
+python tools/restore_db.py --backup backups/backup_20260101T000000Z.db --check
+```
+
+- 备份默认保存在 `backups/`（可用 `BACKUP_DIR` 修改），保留最近 `BACKUP_KEEP` 份（默认 7）。该目录**不得**位于 `uploads/`、`private_uploads/` 或任何 Nginx 静态目录内。
+- 生成文件为 `backup_<UTC 时间>.db` 与 `backup_<UTC 时间>_uploads.tar.gz`。备份先写 `.part`，完整性校验通过后才改名；失败不会覆盖已有的有效备份，也不会留下半份文件。
+- 只备份数据库时去掉 `--with-uploads`；此时 `--check` 会提示没有上传归档（仅能恢复数据库）。
+- 数据库快照与上传归档**非同一时刻生成**（先快照后打包）：快照之后新上传的文件会进入归档但不在数据库记录中，恢复后可能产生少量孤儿文件（无害，`python tools/check_uploads.py` 可识别）。
+
+恢复必须停服务后执行（Windows 上被占用的文件无法替换；Linux 上运行中的进程会继续写入旧文件）：
+
+```bash
+systemctl stop amig
+
+# 预演：只打印将执行的操作
+python tools/restore_db.py --backup backups/backup_xxx.db
+
+# 正式恢复：数据库 + 图片
+python tools/restore_db.py --backup backups/backup_xxx.db --yes \
+    --restore-uploads --force-uploads
+
+# 复核后再启动
+python tools/check_db.py --deep
+python tools/check_uploads.py
+systemctl start amig
+```
+
+恢复注意事项：
+
+- 恢复前会自动把当前库备份为 `backups/pre_restore_<时间>.db`；数据库替换失败或恢复后校验失败会自动回滚。
+- 替换数据库前，旧库与 `-wal/-shm` 会先改名保留而不是直接删除；替换失败时原样还原，不会丢失尚未 checkpoint 的已提交数据。
+- 上传目录先解包到同盘临时目录并确认可读，再整体改名切换；旧目录保留为 `uploads.pre_restore_<时间>`、`private_uploads.pre_restore_<时间>`，确认数据无误后可人工清理。
+- 上传归档必须与备份文件同名配对；找不到配对归档时恢复会中止，不会误用其他时间点的图片。
+- `--force-uploads` 表示允许覆盖现有上传目录（旧目录仍会保留）；不写该参数时，目标目录已存在会拒绝恢复。
+- 备份先取数据库快照再打包图片；若备份期间恰好有图片被删除，`--check` 可能报告少量缺失文件，建议在低峰期执行备份。
+- Linux 恢复后请修正属主：`chown -R www-data:www-data uploads private_uploads`。
 
 ### 后台功能（管理员，独立管理域名）
 
@@ -67,7 +144,7 @@
 | 友情链接 | 增删改、排序、显隐控制 |
 | 页面管理 | 自定义页面增删改，内容按纯文本渲染并自动进行 HTML 转义（保留换行），不支持直接嵌入 HTML |
 | 操作日志 | 记录所有管理员操作，支持关键词模糊搜索与高亮，可追溯 |
-| 修改密码 | 无需原密码，输入新密码 + 确认即可修改 |
+| 修改密码 | 必须验证当前密码；新密码至少 12 位并通过弱口令/重复模式检查；成功后撤销其他设备会话 |
 
 ### 审核机制说明
 
@@ -94,7 +171,7 @@
 | 模板引擎 | Jinja2 |
 | 数据库 | SQLite（WAL 模式） |
 | 图片处理 | Pillow |
-| IP 归属地 | ip-api.com（公网 API，带缓存与失败降级） |
+| IP 归属地 | HTTPS 公网 API（主 `ip.zxinc.org`，回退 `ipapi.co`；带缓存、失败退避与降级） |
 | 密码哈希 | bcrypt |
 | 前端 | 原生 HTML/CSS/JS，无框架 |
 
@@ -109,7 +186,7 @@
   ├── 管理域名 admin.example.com ─► nginx ───────┼── app/routes/admin.py  后台路由
   │        （后台管理入口）                       └── app/routes/api.py    点赞 API
   │
-  └── 数据层：SQLite (data/app.db) + 图片文件 (uploads/)
+  └── 数据层：SQLite (data/app.db) + 图片文件 (uploads/，经 app/routes/media.py 鉴权访问)
 ```
 
 **双域名架构**：通过中间件校验 `Host` 头，非管理域名的 `/admin` 请求一律伪装为 404，实现前后台物理隔离。
@@ -122,27 +199,40 @@
 | `app/config.py` | 全局配置常量与默认值 |
 | `app/database.py` | SQLite 连接、WAL、建表、自动迁移 |
 | `app/models.py` | 数据操作（纯 SQL 参数化查询） |
-| `app/middleware.py` | 管理域名校验、CSRF 中间件、敏感词过滤 |
-| `app/auth.py` | 登录、Session（数据库持久化）、密码哈希、登录锁定 |
+| `app/middleware.py` | 管理域名校验、CSRF/Origin 校验、安全响应头、敏感词过滤 |
+| `app/password_policy.py` | 统一的服务端密码策略（长度、弱口令、bcrypt 字节上限） |
+| `app/auth.py` | 登录、Session（数据库持久化、空闲/绝对超时、CSRF 绑定）、密码哈希、数据库共享登录限流 |
 | `app/limiter.py` | 上传/点赞限流、冷却机制 |
 | `app/ban.py` | 封禁检查 |
-| `app/ip_geo.py` | ip-api.com 归属地查询、客户端 IP 获取 |
-| `app/image_utils.py` | 图片校验、WebP 转换、缩略图、EXIF 剥离 |
+| `app/ip_geo.py` | HTTPS 归属地查询、失败退避、客户端 IP 获取 |
+| `app/image_utils.py` | 图片校验、WebP 转换、缩略图、EXIF 剥离、安全路径解析、文件删除与审核发布移动 |
+| `app/routes/media.py` | 受控 `/uploads` 访问：审核状态 + 管理员身份鉴权、缓存、ETag 与 Range |
+| `app/upload_consistency.py` | 公开/私有上传目录与数据库一致性检查、受控孤儿文件清理 |
+| `tools/check_uploads.py` | 一致性检查命令行工具（默认只读） |
+| `tools/migrate_private_uploads.py` | 历史待审/已拒绝文件一次性迁移到私有目录（默认预演） |
+| `tools/backup_db.py` | 数据库与图片在线备份（SQLite Online Backup API，原子写入、自动校验） |
+| `tools/restore_db.py` | 备份校验与离线恢复（恢复前安全副本、失败自动回滚、上传目录整体切换） |
+| `tools/check_db.py` | 数据库只读健康检查（WAL/busy_timeout/外键/计数漂移/备份状态） |
+| `tools/generate_watermark_samples.py` | 开发辅助：生成水印效果样例图到 docs/watermark_samples/（无破坏性，仅本地使用） |
 | `app/stats.py` | 统计数据、热度榜缓存 |
 
 ### 安全设计
 
-- **CSRF 防护**：中间件自动下发 CSRF Cookie，表单 + Cookie 双重校验
+- **CSRF 防护**：匿名表单使用 Cookie/表单双提交令牌；后台表单使用与会话绑定的服务端令牌；所有修改请求额外校验 Origin/Referer
 - **蜜罐字段**：隐藏表单字段，机器人填写即拒绝
 - **人机验证**：上传页可选 Cloudflare Turnstile（后台配置开关、Site Key 和 Secret Key）
 - **限流**：上传按 IP/UA/全站三层限制 + 冷却倍数递增；点赞按分钟限流
 - **封禁**：IP 精确、CIDR 段、UA 哈希三种维度
-- **登录锁定**：连续失败 5 次锁定 15 分钟；IP 级限流记录按窗口期定期清理
-- **管理员会话**：Session 持久化到数据库；修改密码后撤销其他设备会话并为当前设备重新签发
+- **登录限流**：失败次数按来源 IP 记录在数据库（多 worker 共享），默认 5 次/15 分钟；成功登录清零；不再全局锁定管理员账户，避免多 IP 攻击者造成拒绝服务
+- **管理员会话**：Session 持久化到数据库，绝对有效期 24 小时 + 空闲超时 120 分钟；登录/改密轮换 Session，退出、改密、密码重置均真正撤销服务端会话
+- **密码策略**：至少 12 个字符、不超过 bcrypt 72 字节、拒绝全空格/单一重复/常见弱口令；旧密码哈希继续兼容
+- **安全响应头**：CSP（脚本使用一次性 nonce，不再放开 `script-src 'unsafe-inline'`）、HSTS（仅 HTTPS）、X-Frame-Options、Referrer-Policy、Permissions-Policy 等
 - **后台域名隔离**：数据库中的管理域名白名单为唯一权威配置，支持多个域名；保存后旧域名立即失效；仅信任 `Host` 头，回环 `Host` 只对本机客户端放行
 - **退出登录**：使用 POST + CSRF 校验，避免被跨站请求触发
-- **图片安全**：魔数校验、像素上限防解压炸弹（超限升级为异常并拒绝）、剥离 EXIF 防隐私泄露
-- **文件一致性**：上传入库失败时清理已写入文件；删除图片时先删数据库记录再清理文件
+- **图片安全**：扩展名 + Content-Type + 魔数 + 实际解码校验；像素上限防解压炸弹；拒绝动图；剥离 EXIF/GPS；透明通道保留
+- **受控文件访问**：`/uploads` 不再静态直发。已审核图片公开；待审核/已拒绝图片存放在私有目录，仅管理员可预览；普通访客统一 404；Logo 等公开文件放行；路径穿越、符号链接、未知文件、临时文件一律拒绝
+- **文件一致性**：上传入库失败清理已落盘文件；审核发布移动文件失败回滚为待审核；删除先删数据库再清理文件并记录失败；提供只读的孤立文件检查与一次性迁移工具
+- **图片缓存**：公开图片 `Cache-Control: public, no-cache` + ETag/304 + Range；私有预览 `private, no-store`，避免私有内容被公共缓存
 - **敏感词**：简介/署名敏感词过滤（后台配置）
 - **密码哈希**：bcrypt 单向加密，不可逆
 
@@ -221,12 +311,28 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `ADMIN_DOMAIN` | 管理域名默认值，多个逗号分隔；**仅首次初始化或旧库迁移时写入数据库**，运行期以数据库设置为准 | 空 |
+| `ADMIN_DOMAIN` | 管理域名默认值，多个逗号分隔；**仅首次初始化或旧库迁移时写入数据库**，运行期以数据库设置为准；留空时后台仅允许本机回环访问 | 空 |
+| `HOST` / `PORT` / `WORKERS` | `run.py` 从 `.env`/环境变量读取全部三项；一键启动脚本只读取 shell 环境变量 `PORT`/`WORKERS`（不解析 `.env`）。生产环境只监听回环 | `127.0.0.1` / `8000` / `1` |
 | `DATABASE_PATH` | 数据库路径 | `data/app.db` |
-| `UPLOADS_DIR` | 上传目录 | `uploads` |
-| `IP_API_TIMEOUT` | ip-api.com 请求超时时间（秒） | `3` |
+| `UPLOADS_DIR` | 公开上传目录（已审核图片与 Logo） | `uploads` |
+| `PRIVATE_UPLOADS_DIR` | 私有上传目录（待审核/已拒绝图片） | `private_uploads` |
+| `IP_API_TIMEOUT` | IP 归属地 HTTPS 查询超时时间（秒） | `3` |
 | `IP_API_CACHE_TTL` | IP 归属地缓存时间（秒） | `300` |
-| `TRUSTED_PROXIES` | 可信反向代理地址（逗号分隔），仅这些来源的 `X-Real-IP` 会被信任 | `127.0.0.1,::1,localhost` |
+| `TRUSTED_PROXIES` | 可信反向代理地址（逗号分隔，**仅支持 IP/CIDR，不支持主机名**），仅这些来源的 `X-Real-IP`、`X-Forwarded-Proto` 会被信任；`0.0.0.0/0`、`::/0` 会被拒绝 | `127.0.0.1,::1` |
+| `COOKIE_SECURE` | Cookie 仅通过 HTTPS 传输；生产必须为 `true` | `true` |
+| `HSTS_MAX_AGE` | HSTS 有效期（秒，仅 HTTPS 响应生效） | `31536000` |
+| `HSTS_INCLUDE_SUBDOMAINS` | HSTS 是否包含子域名 | `true` |
+| `SESSION_TTL_HOURS` | 管理员 Session 绝对有效期（小时） | `24` |
+| `SESSION_IDLE_MINUTES` | 管理员 Session 空闲超时（分钟） | `120` |
+| `LOGIN_IP_MAX_ATTEMPTS` | 同一 IP 登录失败上限（窗口内） | `5` |
+| `LOGIN_IP_WINDOW_MINUTES` | 登录失败限流窗口（分钟） | `15` |
+| `DB_BUSY_TIMEOUT_MS` | SQLite 写锁等待上限（毫秒） | `5000` |
+| `DB_SYNCHRONOUS` | WAL 持久化级别（`FULL`/`NORMAL`/`OFF`） | `FULL` |
+| `DB_WAL_AUTOCHECKPOINT_PAGES` | WAL 自动 checkpoint 阈值（页，约 4KB/页） | `1000` |
+| `DB_SLOW_QUERY_MS` | 慢查询日志阈值（毫秒，`0` 关闭） | `200` |
+| `DB_BACKUP_BEFORE_MIGRATION` | 结构迁移前自动快照 | `true` |
+| `BACKUP_DIR` | 备份目录 | `backups` |
+| `BACKUP_KEEP` | 备份保留份数 | `7` |
 | `WATERMARK_FONT_PATH` | 水印字体路径，需支持简体中文；默认使用内置 Noto Sans SC | `app/assets/fonts/NotoSansSC-Regular.otf` |
 
 > 水印字体默认随项目分发，不依赖服务器系统字体。内置字体为 Noto Sans SC，采用 SIL Open Font License 1.1，许可证见 `app/assets/fonts/OFL.txt`。如需更换字体，请将字体文件放入 `app/assets/fonts/` 或通过 `WATERMARK_FONT_PATH` 指定路径，并确认字体许可证允许分发。
@@ -249,7 +355,7 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 | 数据库 | SQLite（无需独立安装） |
 | 反向代理 | Nginx（1.18+，含 `proxy_pass` 模块） |
 | 进程管理 | systemd |
-| 网络 | 服务器可访问 `ip-api.com`（仅上传和点赞时查询，带缓存与失败降级） |
+| 网络 | 服务器可访问 HTTPS 归属地服务（仅上传和点赞时查询，带缓存与失败退避） |
 
 #### 资源占用参考（实测）
 
@@ -323,24 +429,41 @@ cp .env.example .env
 vim .env
 ```
 
-必填项（仅首次部署时使用）：
+首次部署时配置管理域名（只影响首次初始化）：
 
 ```ini
+# 可留空：留空时后台仅允许本机 127.0.0.1/localhost 访问，之后可在后台补配
 ADMIN_DOMAIN=admin.example.com
+
+# 生产 HTTPS 必须保持 true
+COOKIE_SECURE=true
+
+# 应用只监听回环，由 Nginx 对外提供服务
+HOST=127.0.0.1
+PORT=8000
+WORKERS=1
 ```
 
-> 首次启动时，若数据库尚未配置 `admin_domain`，应用会把 `ADMIN_DOMAIN` 归一化后写入数据库一次；之后**数据库中的「站点设置 → 管理域名」是唯一权威配置**，`.env` 与 systemd 中的旧值不会再覆盖它，也不会与服务配置产生冲突。
+> 首次启动时，若数据库尚未配置 `admin_domain`，应用会把 `ADMIN_DOMAIN` 归一化后写入数据库一次；之后**数据库中的「站点设置 → 管理域名」是唯一权威配置**，`.env` 与 systemd 中的旧值不会再覆盖它。
+>
+> 如果首次启动时 `ADMIN_DOMAIN` 为空，应用**不会**写入"已初始化"标记，也不会静默放行任意域名：`/admin` 只允许本机回环访问，并在日志中输出明确警告；之后补充 `.env` 并重启仍可完成初始化。
+>
+> `WORKERS` 修改后需要重启服务。多 worker 下 Session、登录限流和图片审核均通过 SQLite 共享，不会出现登录态不一致。
+>
+> 注意：上传时的图片解码/转码并发限制为**单进程内 4 个**，多 worker 部署时全局并发上限约为 `4 × WORKERS`。Worker 数较多时请评估服务器的 CPU 峰值；每日上传配额与 IP 间隔限制不受影响（基于数据库校验，多 worker 一致）。
 
 可选项（有默认值，通常无需修改）：
 
 ```ini
 DATABASE_PATH=data/app.db
 UPLOADS_DIR=uploads
+PRIVATE_UPLOADS_DIR=private_uploads
+BACKUP_DIR=backups
 IP_API_TIMEOUT=3
 IP_API_CACHE_TTL=300
-# 可信反向代理 IP、主机名或 CIDR（逗号分隔），仅这些来源的 X-Real-IP 会被信任
-# 默认 127.0.0.1,::1,localhost；直连 Cloudflare 回源时需加入其官方出口网段
-TRUSTED_PROXIES=127.0.0.1,::1,localhost
+# 可信反向代理：仅支持 IP/CIDR（不支持主机名），默认仅本机回环
+# 经 Docker/内部网桥转发时填写实际代理网段；禁止 0.0.0.0/0 或 ::/0
+TRUSTED_PROXIES=127.0.0.1,::1
 ```
 
 > **后台域名统一由数据库维护**：登录后台「站点设置 → 管理域名」修改后立即生效（中间件每次请求实时读取数据库），**无需修改 `.env`、systemd 的 `Environment`，也无需重启服务**。旧域名会立即失去后台访问权限，白名单中删除的域名同样立即失效。
@@ -351,13 +474,13 @@ TRUSTED_PROXIES=127.0.0.1,::1,localhost
 
 ### 5. IP 归属地查询
 
-上传和点赞会通过 `ip-api.com` 查询公网 IP 的归属地。查询结果默认缓存 300 秒；网络不可用、私有地址或查询失败时会保留为空，不影响上传和点赞。
+上传和点赞会通过 HTTPS 归属地服务（主 `ip.zxinc.org`，失败回退 `ipapi.co`）查询公网 IP 的归属地。查询结果默认缓存 300 秒；网络不可用、私有地址或查询失败时会保留为空，不影响上传和点赞。
 
 #### Cloudflare 代理下地区显示“未知地区”
 
 **现象与影响**：Cloudflare DNS 记录开启“已代理”（橙色云朵）后，用户仍可正常上传和点赞，但新记录的地区可能显示为“未知地区”。这会影响上传者和点赞者地区识别；历史空地区数据不会自动回填。浏览器中第三方统计脚本、Google reCAPTCHA 或 Cloudflare Analytics 的网络错误与该后端问题无直接关系。
 
-**原因**：Cloudflare 会将真实用户 IP 放在 `CF-Connecting-IP` 请求头中；源站默认收到的是 Cloudflare 节点 IP。Nginx 未仅对 Cloudflare 官方出口网段解析该请求头，或应用未信任 Nginx 反代来源时，`ip-api.com` 收到代理/内网 IP，无法返回地区。
+**原因**：Cloudflare 会将真实用户 IP 放在 `CF-Connecting-IP` 请求头中；源站默认收到的是 Cloudflare 节点 IP。Nginx 未仅对 Cloudflare 官方出口网段解析该请求头，或应用未信任 Nginx 反代来源时，归属地服务收到代理/内网 IP，无法返回地区。
 
 **处理方法**：保留 Cloudflare 橙色云朵，不要关闭 CDN。在宝塔站点 Nginx 的 `server` 块中引入由 Cloudflare 官方 IP 段生成的真实 IP 配置，并继续传递 `$remote_addr`：
 
@@ -386,7 +509,7 @@ location / {
 在 `/www/server/python_project/vhost/env/91bus.env` 中保留或配置实际 Nginx 到应用的可信代理来源：
 
 ```ini
-TRUSTED_PROXIES=127.0.0.1,::1,localhost
+TRUSTED_PROXIES=127.0.0.1,::1
 ```
 
 若项目经 Docker/内部网桥转发，确认实际来源后再加入对应网段，例如 `172.16.0.0/12`。不要在 Python 代码中无条件信任 `CF-Connecting-IP`，否则绕过 Cloudflare 直连源站的请求可伪造 IP。
@@ -417,9 +540,12 @@ python init_db.py
 > **数据库自动迁移**：服务启动时 `init_db()` 会自动检测并补齐以下结构，缺失则自动 `ALTER TABLE ... ADD COLUMN` 或 `CREATE TABLE IF NOT EXISTS`：
 > - `images` 表补充字段：`title`、`region`、`ip`、`ua`、`ua_hash`、`province`、`city`、`content_md5`、`status`、`reject_reason`、`admin_edited`、`reviewed_at`、`views`、`like_count`、`is_duplicate`（历史库缺失的字段自动补空值）
 > - `admin_logs` 表补充字段：`ip`、`location`（历史日志无 IP/位置信息）
-> - `sessions` 表：新增，用于持久化管理员会话（支持多 worker 共享登录态）
+> - `sessions` 表：持久化管理员会话；第二阶段新增 `csrf_token`（会话绑定 CSRF）与 `last_seen_at`（空闲超时），旧会话的活动时间自动用 `created_at` 回填
+> - `login_rate_limits` 表：新增，用于数据库共享的登录失败限流（多 worker 生效）
 >
-> 无需手工执行任何 SQL；部署后重启服务即可自动完成迁移。
+> 无需手工执行任何 SQL；部署后重启服务即可自动完成迁移。升级后旧管理员仍可使用原密码登录，现有会话会继续有效（缺失的 CSRF 令牌会在首次访问时自动补齐）。
+>
+> **第三阶段图片访问升级**：已通过图片继续留在 `uploads/`；新待审/已拒绝图片写入 `private_uploads/`。升级后建议执行 `python tools/migrate_private_uploads.py --apply` 把历史待审文件移入私有目录（先不带 `--apply` 预演）。必须删除 Nginx 中旧的 `location /uploads { alias ... }` 静态配置，否则待审核图片仍可被直接访问。可用 `python tools/check_uploads.py` 检查两个目录的缺失/孤儿情况。
 
 ### 7. 配置 systemd 服务
 
@@ -433,12 +559,15 @@ After=network.target
 [Service]
 Type=simple
 User=www-data
+Group=www-data
 WorkingDirectory=/www/wwwroot/amig
 # 仅首次初始化/旧库迁移时作为数据库默认值；之后以后台「站点设置 → 管理域名」为准
-# 可保留旧值，不会覆盖数据库中已保存的新域名
 Environment="ADMIN_DOMAIN=admin.example.com"
+# 只监听回环，由 Nginx 对外提供服务；WORKERS 按需调整
+Environment="HOST=127.0.0.1"
+Environment="PORT=8000"
 Environment="WORKERS=1"
-ExecStart=/www/wwwroot/amig/venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
+ExecStart=/www/wwwroot/amig/venv/bin/python /www/wwwroot/amig/run.py
 Restart=always
 RestartSec=5
 
@@ -455,7 +584,9 @@ sudo systemctl start amig.service
 sudo systemctl status amig.service
 ```
 
-> `WORKERS` 默认保持 `1`（配合线程池已满足性能需求）。后台 Session 已持久化到数据库，如需多 worker 也能正常共享登录态；但图片处理为 CPU 密集操作，多进程/多线程并发仍需注意资源占用。若需更高并发，可设为 `4`（实测 4 workers 内存约 125 MB），并同步修改 `Environment="WORKERS=4"` 与 `--workers 4`。
+> `WORKERS` 默认 `1`（配合线程池已满足性能需求）。后台 Session、登录限流与审核状态均持久化在数据库，多 worker 共享正常；图片处理为 CPU 密集操作，提高 worker 数前请评估内存与 CPU。修改 `WORKERS` 后执行 `sudo systemctl restart amig.service`。
+>
+> `HOST` 必须保持 `127.0.0.1`，不要改成 `0.0.0.0`，否则会绕过 Nginx 直接把应用端口暴露到公网。
 
 ### 8. 配置 Nginx 反向代理
 
@@ -477,18 +608,19 @@ server {
     ssl_certificate     /etc/ssl/certs/example.com.pem;
     ssl_certificate_key /etc/ssl/private/example.com.key;
 
-    root /www/wwwroot/amig;
     client_max_body_size 12m;
 
     # 后台路由伪装 404
     location /admin { return 404; }
 
-    # 静态文件直发
-    location /uploads/ {
-        alias /www/wwwroot/amig/uploads/;
-        expires 1y;
-        add_header Cache-Control "public, immutable";
-    }
+    # 敏感路径兜底拒绝：即使以后误加 root/try_files 也不会直接泄露
+    # （项目根目录永远不要配置成 Nginx 的 root）
+    location ~ ^/(?:data|backups|private_uploads|logs|tools|tests)(?:/|$) { return 404; }
+    location ~ ^/(?:\.git|\.svn|\.env)(?:/|$) { return 404; }
+
+    # /uploads 必须由应用鉴权（待审核图片仅管理员可见），
+    # 严禁使用 alias/root 直接把 uploads 目录暴露给 Nginx
+    # （不要为 /uploads 单独配置静态 location，交给下面的 location / 反代）
 
     location /static/ {
         alias /www/wwwroot/amig/app/static/;
@@ -498,10 +630,11 @@ server {
     # 反代应用
     location / {
         proxy_pass http://127.0.0.1:8000;
+        # 使用 $host（不含端口）；非 443 端口部署请改用 $http_host
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Proto $scheme;
         proxy_read_timeout 120s;
         proxy_send_timeout 120s;
     }
@@ -526,10 +659,9 @@ server {
 
     client_max_body_size 12m;
 
-    location /uploads/ {
-        alias /www/wwwroot/amig/uploads/;
-        expires 1y;
-    }
+    # 与主域名相同：拒绝敏感路径，且不配置 /uploads、private_uploads 的静态直发
+    location ~ ^/(?:data|backups|private_uploads|logs|tools|tests)(?:/|$) { return 404; }
+    location ~ ^/(?:\.git|\.svn|\.env)(?:/|$) { return 404; }
 
     location /static/ {
         alias /www/wwwroot/amig/app/static/;
@@ -538,15 +670,20 @@ server {
 
     location / {
         proxy_pass http://127.0.0.1:8000;
+        # 使用 $host（不含端口）；非 443 端口部署请改用 $http_host
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Proto $scheme;
         proxy_read_timeout 120s;
         proxy_send_timeout 120s;
     }
 }
 ```
+
+> **不要将 `/www/wwwroot/amig` 配置为 Nginx 的 `root` 或 `alias`**。应用只需要 `proxy_pass` 和 `/static/` 的 `alias`；`data/`、`backups/`、`private_uploads/`、`.env`、`tools/` 等必须由应用或 Nginx 的拒绝规则保护。
+>
+> 若使用非 443 端口（如 `:8443`），`Host` 必须改为 `$http_host` 以保留端口，否则后台 CSRF 的同源校验会比较 `Host` 与 `Origin` 的端口失败。标准 443 端口使用 `$host` 即可。
 
 #### 方案二：宝塔面板
 
@@ -556,12 +693,11 @@ server {
 ```nginx
 location /admin { return 404; }
 
-location /uploads/ {
-    alias /www/wwwroot/amig/uploads/;
-    expires 1y;
-    add_header Cache-Control "public, immutable";
-}
+# 敏感路径兜底拒绝（站点根目录不要指向项目目录）
+location ~ ^/(?:data|backups|private_uploads|logs|tools|tests)(?:/|$) { return 404; }
+location ~ ^/(?:\.git|\.svn|\.env)(?:/|$) { return 404; }
 
+# /uploads 不要配置 alias/静态直发；由应用按审核状态鉴权后返回文件
 location /static/ {
     alias /www/wwwroot/amig/app/static/;
     expires 30d;
@@ -579,30 +715,89 @@ location /static/ {
 
 ```bash
 cd /www/wwwroot/amig
-mkdir -p data uploads
-chown -R www-data:www-data data uploads
-chmod -R 755 data uploads
+mkdir -p data uploads private_uploads backups
+chown -R www-data:www-data data uploads private_uploads backups
+chmod -R 755 data uploads private_uploads backups
+# .env 可能包含密钥，仅运行用户可读
+chmod 600 .env
 ```
+
+> 备份工具需要写入 `backups/`。若以 root 执行备份，完成后请把新文件属主改回 `www-data`；恢复后同样需要修正 `uploads/`、`private_uploads/` 的属主。
+
+### 10. 更换域名
+
+前台域名更换：
+
+1. 完成新域名的 DNS 解析、Nginx `server_name` 与 HTTPS 证书配置。
+2. 应用代码无需修改：模板与接口均使用相对路径，Cookie 不绑定固定域名（Host-only），图片地址也不含绝对域名。
+3. 用户在新域名重新登录即可；如需平滑过渡，可在旧域名 Nginx 配置 `return 301 https://新域名$request_uri;`。
+4. 前台域名与后台管理域名相互独立，更换前台域名不影响后台白名单。
+
+管理域名更换：
+
+1. 先完成新管理域名的 DNS、Nginx 与证书，**保留旧管理域名暂时可访问**。
+2. 用旧管理域名登录后台 →「站点设置 → 管理域名」→ 用新域名替换旧域名 → 保存。
+3. 保存后立即生效：新域名可访问 `/admin`，旧域名与已删除域名访问 `/admin` 一律 404；无需改 `.env`、无需重启。会话 Cookie 为 Host-only，管理员需在新域名重新登录。
+4. `.env` / systemd 中的 `ADMIN_DOMAIN` 只在首次初始化或旧库迁移时写入数据库，之后修改不会覆盖数据库配置。
+5. 如果旧管理域名已经无法访问：在本机通过 `http://127.0.0.1:8000/admin/login` 修改（回环地址始终放行）。服务器没有本机浏览器时，可先建立 SSH 隧道：
+   ```bash
+   ssh -L 8000:127.0.0.1:8000 user@server
+   # 然后在本地浏览器访问 http://127.0.0.1:8000/admin/login
+   ```
+
+### 11. 部署后验证
+
+先在服务器执行 `nginx -t && systemctl reload nginx`，再逐项确认：
+
+```bash
+# HTTP -> HTTPS 跳转
+curl -I http://example.com/
+# HTTPS 正常响应，且包含 HSTS
+curl -sI https://example.com/ | grep -i strict-transport-security
+# 主域名后台 404，管理域名登录页 200
+curl -I https://example.com/admin
+curl -I https://admin.example.com/admin/login
+# 敏感路径不可访问（应为 404）
+curl -I https://example.com/data/app.db
+curl -I https://example.com/backups/
+curl -I https://example.com/private_uploads/
+curl -I https://example.com/.env
+# 已通过图片公开访问、待审核图片 404（替换为实际文件相对路径）
+curl -I https://example.com/uploads/2026/11/approved-example.webp
+curl -I https://example.com/uploads/2026/11/pending-example.webp
+```
+
+应用层复核：
+
+```bash
+python tools/check_db.py --deep
+python tools/check_uploads.py
+```
+
+> 上述 Nginx/HTTPS/证书/跳转验证必须在真实服务器执行；本地开发环境只能验证应用层行为。浏览器开发者工具中确认管理员 Cookie 带有 `Secure`、`HttpOnly`、`SameSite=Lax`。
 
 ### 安全建议
 
 1. **HTTPS**：前后台域名均强制 HTTPS
 2. **防火墙**：仅开放 80/443，应用端口 8000 仅监听 127.0.0.1
 3. **端口隔离**：uvicorn 仅绑定 `127.0.0.1:8000`，不对外暴露 8000 端口
-4. **静态目录禁执行脚本**：
-   ```nginx
-   location /uploads/ {
-       location ~ \.php$ { return 403; }
-   }
-   ```
-5. **定期备份**：
+4. **上传目录与敏感目录不得由 Nginx 直接公开**：
+   - `/uploads` 由应用路由按审核状态和管理员会话鉴权；
+   - 不要配置 `location /uploads` 的 `alias`/`root`，否则会绕过私有图片保护；
+   - `private_uploads/` 必须只由应用进程访问，**不要**加入任何 Nginx 静态 location；
+   - 旧部署如存在 `alias /www/wwwroot/amig/uploads/`，升级时必须删除；
+   - 不要把项目根目录配置为 Nginx 的 `root`：`data/`（数据库）、`backups/`、`.env`、`tools/` 都可能被直接下载；示例配置已加入显式拒绝规则。
+5. **反向代理**：`proxy_set_header Host $host` 必须配置，否则后台域名隔离与 CSRF 同源校验会失效；`X-Real-IP` 与 `X-Forwarded-Proto` 只在来源属于 `TRUSTED_PROXIES` 时被信任，禁止把该配置设为 `0.0.0.0/0`。
+6. **定期备份**：使用专用工具（不要直接 `tar` 正在运行的 `.db`，WAL 内容会丢失）：
    ```bash
-   tar -czf backup-$(date +%Y%m%d).tar.gz data/app.db uploads/
+   python tools/backup_db.py --with-uploads
+   python tools/restore_db.py --backup backups/backup_xxx.db --check
    ```
-6. **回滚**：`git revert <commit>` 后重启服务；或恢复代码备份后重启。
-7. **安全响应头**：应用已内置 `SecurityHeadersMiddleware` 自动添加 `X-Content-Type-Options: nosniff`、`X-Frame-Options: SAMEORIGIN`、`Referrer-Policy`、`Content-Security-Policy` 及 `Strict-Transport-Security`（默认 `max-age=31536000; includeSubDomains`）。若使用 Cloudflare，请在面板中开启 HSTS 并勾选 **Include Subdomains**（覆盖管理子域名）。
-8. **Cookie 安全标志**：生产环境请确保 `.env` 中 `COOKIE_SECURE=true`（默认已启用），使后台会话与 CSRF Cookie 仅在 HTTPS 下传输。
-9. **依赖漏洞扫描**：定期执行 `pip-audit -r requirements.txt`（或 `safety check`），并及时升级 `python-multipart`、`starlette`、`Pillow` 等存在历史 CVE 的组件。
+   详见「数据备份与恢复」一节。
+7. **回滚**：`git revert <commit>` 后重启服务；或恢复代码备份后重启。
+8. **安全响应头**：应用已内置 `SecurityHeadersMiddleware` 自动添加 `X-Content-Type-Options: nosniff`、`X-Frame-Options: SAMEORIGIN`、`Referrer-Policy`、`Content-Security-Policy` 及 `Strict-Transport-Security`（默认 `max-age=31536000; includeSubDomains`）。CSP 的 `script-src` 与 `style-src` 均使用每请求一次性 nonce，不再允许任意内联脚本或内联样式。若使用 Cloudflare，请在面板中开启 HSTS 并勾选 **Include Subdomains**（覆盖管理子域名）。若 Nginx/Cloudflare 也要配置 CSP，请移除上游 CSP 或使用相同 nonce 机制，避免覆盖应用生成的 nonce 导致页面脚本被浏览器拦截。
+9. **Cookie 安全标志**：生产环境请确保 `.env` 中 `COOKIE_SECURE=true`（默认已启用），使后台会话与 CSRF Cookie 仅在 HTTPS 下传输。
+10. **依赖漏洞扫描**：定期执行 `pip-audit -r requirements.txt`（或 `safety check`），并及时升级 `python-multipart`、`starlette`、`Pillow` 等存在历史 CVE 的组件。
 
 ---
 
@@ -648,7 +843,9 @@ chmod -R 755 data uploads
 
 #### 修改密码
 
-- 进入「修改密码」，输入新密码并确认（至少 6 位），无需原密码
+- 进入「修改密码」，必须输入当前密码进行验证
+- 新密码至少 12 个字符（UTF-8 不超过 72 字节），不能全部为空格、单一重复或常见弱口令
+- 修改成功后撤销全部旧会话，并为当前设备签发新的 Session 与 CSRF 令牌
 
 #### 密码重置（忘记密码时）
 
@@ -656,13 +853,14 @@ chmod -R 755 data uploads
 
 ```bash
 python reset_password.py                         # 交互式输入并确认新密码
-python reset_password.py --yes                   # 生成随机强密码并直接重置
-python reset_password.py --password 你的密码 --yes # 指定新密码并直接重置
+python reset_password.py --yes                   # 跳过确认，仍会交互式输入密码
+echo '你的新密码' | python reset_password.py --stdin --yes  # 自动化场景，避免密码进入命令行参数
 ```
 
-- 新密码至少 8 位
-- 同时清除登录失败计数与锁定状态
-- 使用 `--yes` 时会输出生成的随机密码，请妥善保存
+- 已移除 `--password` 参数，避免密码出现在进程参数和 shell 历史中
+- 新密码至少 12 个字符，并通过与后台一致的密码策略
+- 同一事务内清除登录失败统计与锁定状态，并撤销全部旧会话
+- 脚本不会在输出中打印新密码
 
 ---
 
@@ -688,8 +886,11 @@ amig/
 │   │   └── api.py           # 点赞 API
 │   ├── templates/           # Jinja2 模板（前台 + 后台）
 │   └── static/              # 静态资源（CSS/JS）
-├── uploads/                 # 上传图片存储（按年/月分目录）
+├── uploads/                 # 已审核图片与 Logo（按年/月分目录）
+├── private_uploads/         # 待审核/已拒绝图片（仅应用可读，Nginx 不得直接暴露）
 ├── data/                    # 数据文件（app.db）
+├── backups/                 # 备份文件（数据库快照 + 图片归档，勿提交/勿公开）
+├── tools/                   # 运维工具（备份、恢复、健康检查、迁移、一致性检查）
 ├── tests/                   # 单元测试（unittest）
 ├── .env.example             # 环境变量示例
 ├── requirements.txt         # Python 依赖
@@ -753,18 +954,18 @@ A：确认后台已开启「人机验证」，并正确填写 Cloudflare Turnsti
 A：不能。「拒绝」等同于「删除」，图片文件与记录会彻底移除，操作前请谨慎确认。
 
 **Q：IP 归属地不显示？**
-A：确认服务器可以访问 `ip-api.com`，并检查 `IP_API_TIMEOUT` 与 `IP_API_CACHE_TTL` 配置。私有地址、回环地址及查询失败不会显示归属地，也不会影响上传或点赞。
+A：确认服务器可以访问 HTTPS 归属地服务（主 `ip.zxinc.org`，回退 `ipapi.co`），并检查 `IP_API_TIMEOUT` 与 `IP_API_CACHE_TTL` 配置。私有地址、回环地址及查询失败不会显示归属地，也不会影响上传或点赞。
 
 ### 密码与账号类
 
 **Q：忘记管理员密码？**
-A：执行 `python reset_password.py` 后交互式设置新密码；非交互环境可使用 `python reset_password.py --yes` 生成随机强密码（详见上文「密码重置」）。
+A：执行 `python reset_password.py` 后交互式设置新密码；自动化环境可通过 `--stdin` 从标准输入提供密码（详见上文「密码重置」）。重置会同时撤销全部旧会话。
 
 **Q：修改密码需要原密码吗？**
-A：不需要。登录状态下直接输入新密码 + 确认即可修改。
+A：需要。必须验证当前密码，防止仅凭被盗 Cookie 直接改密；新密码需至少 12 个字符。
 
 **Q：管理员登录被锁定？**
-A：连续输错 5 次会锁定 15 分钟，等待后重试，或运行密码重置脚本解除锁定。
+A：第二阶段取消了全局账户锁定，失败次数只按来源 IP 限流（默认 5 次/15 分钟），窗口结束后自动恢复；不会再因多 IP 攻击把管理员账户锁死。若旧数据库仍有 `locked_until`，登录成功后会自动清除。
 
 ### 部署与迁移类
 
@@ -789,13 +990,14 @@ cd /www/wwwroot/amig && python3 -c "import sqlite3; c=sqlite3.connect('data/app.
 | `images` | 图片信息（文件名、尺寸、大小、标题、简介、状态、IP、地区、点赞/浏览计数等） |
 | `likes` | 点赞记录（图片 ID、IP、UA 哈希、地区） |
 | `ban_list` | 封禁列表（IP/CIDR/UA 哈希） |
-| `admins` | 管理员账号（bcrypt 密码哈希、登录锁定） |
+| `admins` | 管理员账号（bcrypt 密码哈希、失败统计；旧 `locked_until` 字段保留兼容但不再全局锁定） |
 | `settings` | 站点配置（键值对，含管理域名） |
 | `pages` | 自定义页面 |
 | `friend_links` | 友情链接 |
 | `daily_stats` | 每日统计（上传/通过/拒绝/点赞/浏览） |
 | `admin_logs` | 管理员操作日志（含 IP） |
-| `sessions` | 管理员会话（持久化，支持多 worker 共享登录态） |
+| `sessions` | 管理员会话（持久化、空闲/绝对超时、会话绑定 CSRF） |
+| `login_rate_limits` | 登录失败限流（按来源 IP，多 worker 共享） |
 | `view_sessions` | 浏览去重记录 |
 | `cooling` | 冷却机制（拒绝次数、冷却倍数） |
 

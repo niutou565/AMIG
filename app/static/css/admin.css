@@ -428,6 +428,19 @@
 
 .batch-actions { margin-bottom: var(--s3); }
 .batch-actions form { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
+.batch-count { color: var(--text-muted); font-size: var(--fs-xs); }
+/* 提交中状态：保持按钮可读但不接受再次点击 */
+.btn.is-loading { opacity: 0.6; pointer-events: none; cursor: progress; }
+/* 批量操作失败项：提供逐张跳转入口 */
+.flash-failed { margin: 0 0 var(--s3); color: var(--text-secondary); font-size: var(--fs-sm); }
+.flash-failed a { color: var(--accent); }
+/* 字段级校验：红框 + 就地错误提示 */
+.form-group .input-error { border-color: var(--danger); }
+.field-error { margin-top: 4px; color: var(--danger); font-size: var(--fs-xs); }
+/* 仪表盘快捷入口 */
+.quick-actions { margin-bottom: var(--s4); }
+.quick-actions .panel-head { margin-bottom: var(--s3); }
+.quick-action-list { display: flex; flex-wrap: wrap; gap: var(--s2); }
 
 /* ===== 状态徽章 ===== */
 .status-badge {

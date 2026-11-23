@@ -9,8 +9,22 @@ setlocal enabledelayedexpansion
 title Anonymous Image Sharing
 
 set "SCRIPT_DIR=%~dp0"
-set "PORT=8000"
+if not defined PORT set "PORT=8000"
+if not defined WORKERS set "WORKERS=1"
 set "PROJECT_URL=http://127.0.0.1:%PORT%"
+
+echo %PORT%| findstr /r "^[0-9][0-9]*$" >nul
+if %errorlevel% neq 0 (
+    echo [ERROR] PORT must be an integer (current: %PORT%)
+    pause
+    exit /b 1
+)
+echo %WORKERS%| findstr /r "^[1-9][0-9]*$" >nul
+if %errorlevel% neq 0 (
+    echo [ERROR] WORKERS must be a positive integer (current: %WORKERS%)
+    pause
+    exit /b 1
+)
 
 echo.
 echo   ==========================================
@@ -134,6 +148,7 @@ if defined OCCUPYING_PID (
 echo.
 echo [*] Starting web server...
 echo     URL: %PROJECT_URL%
+echo     Workers: %WORKERS%
 echo     Press Ctrl+C to stop
 echo.
 
@@ -142,7 +157,7 @@ start /b cmd /c "timeout /t 3 /nobreak >nul && start "" "%PROJECT_URL%""
 
 :: Start uvicorn
 cd /d "%SCRIPT_DIR%"
-python -m uvicorn app.main:app --host 127.0.0.1 --port %PORT% --workers 1 --log-level info
+python -m uvicorn app.main:app --host 127.0.0.1 --port %PORT% --workers %WORKERS% --log-level info
 
 echo.
 echo [*] Server stopped

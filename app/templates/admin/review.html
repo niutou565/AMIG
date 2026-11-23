@@ -1,8 +1,21 @@
 {% extends "admin/admin_base.html" %}
 {% block title %}图片审核{% endblock %}
 
+{% block flash_extra %}
+{% if flash_failed_ids %}
+<p class="flash-failed">失败图片：
+    {% for iid in flash_failed_ids %}<a href="/admin/review/{{ iid }}">#{{ iid }}</a>{% if not loop.last %}、{% endif %}{% endfor %}
+    ，请逐张查看原因后重试。
+</p>
+{% endif %}
+{% endblock %}
+
 {% block content %}
 <h1>图片审核</h1>
+
+<p class="search-result-info">
+    {% if query %}搜索「{{ query }}」找到 {{ total }} 张待审核图片{% else %}共 {{ total }} 张待审核图片{% endif %}
+</p>
 
 <div class="toolbar">
     <form class="toolbar-search" method="get" action="/admin/review" role="search">
@@ -16,8 +29,9 @@
     <form method="post" action="/admin/review/batch" id="batchForm">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <input type="hidden" name="ids" id="batchIds">
-        <button type="button" class="btn btn-sm btn-success" onclick="batchAction('approved')">批量通过</button>
-        <button type="button" class="btn btn-sm btn-danger" onclick="batchAction('rejected')">批量删除</button>
+        <button type="button" class="btn btn-sm btn-success" data-batch-action="approved" disabled>批量通过</button>
+        <button type="button" class="btn btn-sm btn-danger" data-batch-action="rejected" disabled>批量删除</button>
+        <span class="batch-count" id="batchCount" role="status">已选 0 张</span>
     </form>
 </div>
 
@@ -41,7 +55,7 @@
                 <td><input type="checkbox" class="img-check" value="{{ img.id }}" aria-label="选择图片 {{ img.id }}"></td>
                 <td><img src="/uploads/{{ img.thumb_filename }}" class="table-thumb" alt="" loading="lazy"></td>
                 <td>{{ img.title or '-' }}</td>
-                <td>{{ img.description[:40] or '-' }}</td>
+                <td>{{ (img.description or '')[:40] or '-' }}</td>
                 <td>{{ img.author or '匿名用户' }}</td>
                 <td><span title="{{ img.ip }}">{{ img.province }}{{ img.city or '' }}</span></td>
                 <td class="log-time">{{ img.created_at[:10] }}</td>
@@ -52,7 +66,7 @@
                             <button type="submit" name="action" value="approve" class="btn btn-sm btn-success">通过</button>
                         </form>
                         <form method="post" action="/admin/review/{{ img.id }}"
-                              onsubmit="return confirm('确定拒绝并删除该图片？图片文件将被彻底移除，不可恢复。')">
+                              data-confirm="确定拒绝并删除该图片？图片文件将被彻底移除，不可恢复。">
                             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                             <button type="submit" name="action" value="reject" class="btn btn-sm btn-danger">删除</button>
                         </form>
@@ -62,7 +76,9 @@
             </tr>
             {% else %}
             <tr>
-                <td colspan="8">暂无待审核图片</td>
+                <td colspan="8">
+                    {% if query %}没有找到匹配的待审核图片，<a href="/admin/review">清除搜索</a>{% else %}暂无待审核图片{% endif %}
+                </td>
             </tr>
             {% endfor %}
         </tbody>
@@ -73,10 +89,25 @@
 {% endblock %}
 
 {% block scripts %}
-<script>
+<script nonce="{{ request.state.csp_nonce }}">
+var batchButtons = document.querySelectorAll('[data-batch-action]');
+var batchCount = document.getElementById('batchCount');
+
+function updateBatchState() {
+    var count = document.querySelectorAll('.img-check:checked').length;
+    if (batchCount) batchCount.textContent = '已选 ' + count + ' 张';
+    batchButtons.forEach(function (btn) { btn.disabled = count === 0; });
+}
+
 document.getElementById('selectAll')?.addEventListener('change', function() {
     document.querySelectorAll('.img-check').forEach(function (cb) { cb.checked = this.checked; });
+    updateBatchState();
 });
+document.querySelectorAll('.img-check').forEach(function (cb) {
+    cb.addEventListener('change', updateBatchState);
+});
+updateBatchState();
+
 function batchAction(action) {
     var ids = Array.from(document.querySelectorAll('.img-check:checked')).map(function (cb) { return cb.value; });
     if (!ids.length) { alert('请先选择图片'); return; }
@@ -91,5 +122,8 @@ function batchAction(action) {
     form.appendChild(btn);
     form.submit();
 }
+document.querySelectorAll('[data-batch-action]').forEach(function (btn) {
+    btn.addEventListener('click', function () { batchAction(btn.dataset.batchAction); });
+});
 </script>
 {% endblock %}

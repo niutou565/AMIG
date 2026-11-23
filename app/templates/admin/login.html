@@ -4,10 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>登录 - {{ site_name or '后台管理' }}</title>
-    <meta name="theme-color" content="#0b0b0d">
-    <link rel="stylesheet" href="/static/css/dark.css?v=3">
-    <link rel="stylesheet" href="/static/css/admin.css?v=3">
-    <style>:root { --accent: {{ accent_color | safe_color }}; }</style>
+    <meta name="theme-color" content="#0a0a0a">
+    <link rel="icon" type="image/svg+xml" href="/static/img/favicon.svg">
+    <link rel="stylesheet" href="/static/css/dark.css?v=8">
+    <link rel="stylesheet" href="/static/css/admin.css?v=4">
+    <style nonce="{{ request.state.csp_nonce }}">:root { --accent: {{ accent_color | safe_color }}; }</style>
 </head>
 <body>
     <div class="login-page">

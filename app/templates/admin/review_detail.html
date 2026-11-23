@@ -5,10 +5,6 @@
 <a href="/admin/review" class="detail-back">&larr; 返回审核列表</a>
 <h1>审核图片 #{{ image.id }}</h1>
 
-{% if error %}
-<div class="alert alert-error" role="alert">{{ error }}</div>
-{% endif %}
-
 <div class="review-detail">
     <div class="review-image">
         <img src="/uploads/{{ image.filename }}" alt="待审核图片 #{{ image.id }}">
@@ -58,7 +54,7 @@
     <div class="review-actions">
         <button type="submit" name="action" value="approve" class="btn btn-success">通过并发布</button>
         <button type="submit" name="action" value="reject" class="btn btn-danger"
-                onclick="return confirm('确定拒绝并删除该图片？图片文件将被彻底移除，不可恢复。')">拒绝并删除</button>
+                data-confirm="确定拒绝并删除该图片？图片文件将被彻底移除，不可恢复。">拒绝并删除</button>
     </div>
 </form>
 {% endif %}

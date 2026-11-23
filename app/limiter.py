@@ -31,8 +31,7 @@ def check_upload_limit(ip: str, ua_hash_val: str) -> tuple:
     # IP 上限
     ip_count = count_uploads_today_by_ip(ip)
     if ip_count >= per_ip:
-        remaining = max(0, per_ip - ip_count)
-        return (False, f"今日上传次数已达上限（{per_ip}次），剩余 {remaining} 次")
+        return (False, f"今日上传次数已达上限（{per_ip}次）")
 
     # UA 上限
     if per_ua > 0:

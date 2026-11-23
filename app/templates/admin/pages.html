@@ -38,7 +38,7 @@
                     <div class="row-actions">
                         <a href="/admin/pages/edit/{{ p.id }}" class="btn btn-sm">编辑</a>
                         <form method="post" action="/admin/pages/delete/{{ p.id }}"
-                              onsubmit="return confirm('确定删除该页面？删除后无法恢复。')">
+                              data-confirm="确定删除该页面？删除后无法恢复。">
                             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                             <button type="submit" class="btn btn-sm btn-danger">删除</button>
                         </form>

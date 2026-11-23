@@ -1,14 +1,16 @@
 """图片处理工具"""
 import os
 import hashlib
+import logging
+import shutil
 import uuid
 import warnings
 from datetime import datetime
 from functools import lru_cache
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from PIL import Image, ImageDraw, ImageFont
 from app.config import (
-    UPLOADS_DIR, MAX_UPLOAD_SIZE, MAX_IMAGE_PIXELS,
+    UPLOADS_DIR, PRIVATE_UPLOADS_DIR, MAX_UPLOAD_SIZE, MAX_IMAGE_PIXELS,
     ALLOWED_EXTENSIONS, MAX_IMAGE_DIMENSION, THUMB_DIMENSION,
     WEBP_QUALITY, WEBP_EFFORT, WATERMARK_FONT_PATH
 )
@@ -19,6 +21,8 @@ Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 warnings.simplefilter("error", Image.DecompressionBombWarning)
 
 PIXEL_LIMIT_ERROR = f"图片像素总数超过安全限制（最大 {MAX_IMAGE_PIXELS // 10000} 万像素）"
+ANIMATED_IMAGE_ERROR = "暂不支持动图（多帧图片），请上传单帧图片"
+LOGGER = logging.getLogger(__name__)
 
 MAGIC_BYTES = {
     b'\xff\xd8\xff': 'jpg',
@@ -26,11 +30,33 @@ MAGIC_BYTES = {
     b'RIFF': 'webp',  # RIFF....WEBP
 }
 
+_FORMAT_BY_EXT = {".jpg": "jpg", ".jpeg": "jpg", ".png": "png", ".webp": "webp"}
+_CONTENT_TYPE_FORMATS = {
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/pjpeg": "jpg",
+    "image/png": "png",
+    "image/x-png": "png",
+    "image/webp": "webp",
+}
+_ALLOWED_OCTET_TYPES = {"", "application/octet-stream", "binary/octet-stream"}
 
-def validate_image(file_data: bytes, filename: str) -> tuple:
-    """
-    校验图片，返回 (valid, error_message)
-    """
+
+def detect_image_format(data: bytes):
+    """根据文件头返回实际图片格式（jpg/png/webp），无法识别返回 None。"""
+    if data[:3] == b'\xff\xd8\xff':
+        return "jpg"
+    if data[:8] == b'\x89PNG\r\n\x1a\n':
+        return "png"
+    if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+        return "webp"
+    return None
+
+
+def validate_image(file_data: bytes, filename: str, content_type=None) -> tuple:
+    """校验图片：扩展名、声明类型、文件头、像素上限与实际解码。"""
+    from io import BytesIO
+
     # 扩展名检查
     ext = os.path.splitext(filename)[1].lower()
     if ext not in ALLOWED_EXTENSIONS:
@@ -40,30 +66,92 @@ def validate_image(file_data: bytes, filename: str) -> tuple:
     if len(file_data) > MAX_UPLOAD_SIZE:
         return (False, f"图片大小超过限制（最大 {MAX_UPLOAD_SIZE // 1024 // 1024}MB）")
 
-    # Magic bytes 校验
-    if not check_magic_bytes(file_data, ext):
+    expected_format = _FORMAT_BY_EXT.get(ext)
+    actual_format = detect_image_format(file_data)
+    if expected_format is None or actual_format != expected_format:
         return (False, "图片格式与文件内容不匹配，请上传正确的图片文件")
+
+    # Content-Type 是客户端声明值，只作为附加一致性校验；无法替代内容检测。
+    declared = str(content_type or "").split(";")[0].strip().lower()
+    if declared not in _ALLOWED_OCTET_TYPES:
+        declared_format = _CONTENT_TYPE_FORMATS.get(declared)
+        if declared_format is None:
+            return (False, f"不支持的 Content-Type：{declared}")
+        if declared_format != actual_format:
+            return (False, "声明的 Content-Type 与实际图片内容不匹配")
+
+    # 实际解码校验：拒绝损坏/截断图片、解压炸弹与动图（当前处理管线只支持单帧）
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(BytesIO(file_data)) as probe:
+                if probe.width * probe.height > MAX_IMAGE_PIXELS:
+                    return (False, PIXEL_LIMIT_ERROR)
+                if (getattr(probe, "is_animated", False)
+                        or int(getattr(probe, "n_frames", 1) or 1) > 1):
+                    return (False, ANIMATED_IMAGE_ERROR)
+                probe.verify()
+    except (Image.DecompressionBombWarning, Image.DecompressionBombError):
+        return (False, PIXEL_LIMIT_ERROR)
+    except Exception:
+        return (False, "图片文件损坏或无法解码，请重新选择图片")
 
     return (True, "")
 
 
 def check_magic_bytes(data: bytes, ext: str) -> bool:
-    """验证文件头魔数"""
-    if ext in ('.jpg', '.jpeg'):
-        return data[:3] == b'\xff\xd8\xff'
-    if ext == '.png':
-        return data[:8] == b'\x89PNG\r\n\x1a\n'
-    if ext == '.webp':
-        return data[:4] == b'RIFF' and data[8:12] == b'WEBP'
-    return False
+    """验证文件头魔数（保留旧接口供测试/调用方使用）。"""
+    expected = _FORMAT_BY_EXT.get(ext)
+    return expected is not None and detect_image_format(data) == expected
+
+
+def resolve_upload_path(relative, must_exist=True, uploads_dir=None):
+    """把数据库中的相对路径安全解析到上传目录内。
+
+    拒绝绝对路径、盘符、`..`、NUL、越界路径与符号链接；不存在时返回 None。
+    """
+    if relative is None:
+        return None
+    normalized = str(relative).replace("\\", "/")
+    if not normalized or "\x00" in normalized or normalized.startswith("/"):
+        return None
+    parts = PurePosixPath(normalized).parts
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        return None
+    if ":" in parts[0]:
+        return None
+
+    base = Path(uploads_dir or UPLOADS_DIR).resolve()
+    try:
+        candidate = (base / Path(*parts)).resolve()
+    except (OSError, RuntimeError):
+        return None
+    try:
+        candidate.relative_to(base)
+    except ValueError:
+        return None
+    if candidate.is_symlink():
+        return None
+    if must_exist and not candidate.is_file():
+        return None
+    return candidate
 
 
 def _atomic_write(path: str, data: bytes):
     """先写临时文件再原子替换，避免进程中断留下半截文件。"""
     tmp_path = path + ".tmp"
-    with open(tmp_path, "wb") as f:
-        f.write(data)
-    os.replace(tmp_path, path)
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(data)
+        os.replace(tmp_path, path)
+    except OSError:
+        # 写入或替换失败时清理临时文件，避免上传目录残留 .tmp 垃圾
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 class WatermarkFontError(RuntimeError):
@@ -331,7 +419,7 @@ def _build_watermark_ops(draw, canvas_size, watermark_text, author, uploaded_at)
     return main_ops + info_ops
 
 
-def _draw_watermark(img, watermark_text, author, uploaded_at):
+def _draw_watermark(img, watermark_text, author, uploaded_at, preserve_alpha=False):
     if not any((watermark_text, author, uploaded_at)):
         return img
     canvas = img.convert("RGBA")
@@ -347,7 +435,9 @@ def _draw_watermark(img, watermark_text, author, uploaded_at):
             fill=(0, 0, 0, 160), anchor=anchor
         )
         draw.text(xy, text, font=font, fill=(255, 255, 255, 228), anchor=anchor)
-    return Image.alpha_composite(canvas, overlay).convert("RGB")
+    composed = Image.alpha_composite(canvas, overlay)
+    # 保留透明通道：透明 PNG/WebP 不能因为加水印被静默转为不透明 RGB
+    return composed if preserve_alpha else composed.convert("RGB")
 
 
 def _open_image_checked(file_data: bytes):
@@ -368,7 +458,8 @@ def _open_image_checked(file_data: bytes):
     return img
 
 
-def process_image(file_data: bytes, watermark_text="", author="", uploaded_at="") -> tuple:
+def process_image(file_data: bytes, watermark_text="", author="", uploaded_at="",
+                  target_dir=None) -> tuple:
     """
     处理图片：剥离 EXIF、缩放到最长边 1920、添加水印、转 WebP、生成缩略图
     返回 (result_dict, error_message)
@@ -380,18 +471,31 @@ def process_image(file_data: bytes, watermark_text="", author="", uploaded_at=""
     full_dir = None
     filename = None
     thumb_filename = None
+    img = None
+    thumb = None
 
     try:
         try:
             img = _open_image_checked(file_data)
         except (Image.DecompressionBombWarning, Image.DecompressionBombError):
             return (None, PIXEL_LIMIT_ERROR)
+        except Exception:
+            return (None, "图片文件损坏或无法解码，请重新选择图片")
+
+        if (getattr(img, "is_animated", False)
+                or int(getattr(img, "n_frames", 1) or 1) > 1):
+            img.close()
+            return (None, ANIMATED_IMAGE_ERROR)
 
         # 检查在上面的辅助函数中已完成（仅读取文件头，尚未解码像素数据）
 
-        # 剥离 EXIF（转为 RGB 或 RGBA）
+        # 剥离 EXIF；只对有透明信息的图片保留 Alpha，避免所有 PNG 都被转成 RGBA
+        had_alpha = (
+            img.mode in ('RGBA', 'LA')
+            or (img.mode == 'P' and 'transparency' in img.info)
+        )
         if img.mode not in ('RGB', 'RGBA'):
-            img = img.convert('RGBA')
+            img = img.convert('RGBA' if had_alpha else 'RGB')
 
         # 获取 EXIF 方向并矫正（若有）
         try:
@@ -414,7 +518,9 @@ def process_image(file_data: bytes, watermark_text="", author="", uploaded_at=""
             img = img.resize((new_width, new_height), Image.LANCZOS)
             width, height = new_width, new_height
 
-        img = _draw_watermark(img, watermark_text, author, uploaded_at)
+        img = _draw_watermark(
+            img, watermark_text, author, uploaded_at, preserve_alpha=had_alpha
+        )
 
         # 转 WebP
         output = BytesIO()
@@ -442,12 +548,15 @@ def process_image(file_data: bytes, watermark_text="", author="", uploaded_at=""
         filename = f"{uuid.uuid4().hex}.webp"
         thumb_filename = f"{uuid.uuid4().hex}_thumb.webp"
 
-        full_dir = os.path.join(UPLOADS_DIR, subdir)
+        full_dir = os.path.join(target_dir or UPLOADS_DIR, subdir)
         os.makedirs(full_dir, exist_ok=True)
 
         # 原子写入文件
         _atomic_write(os.path.join(full_dir, filename), compressed_data)
         _atomic_write(os.path.join(full_dir, thumb_filename), thumb_data)
+
+        thumb.close()
+        img.close()
 
         return ({
             "filename": f"{subdir}/{filename}",
@@ -461,11 +570,28 @@ def process_image(file_data: bytes, watermark_text="", author="", uploaded_at=""
         }, "")
     except WatermarkFontError as exc:
         _cleanup_partial_files(full_dir, filename, thumb_filename)
+        _close_image(img)
+        _close_image(thumb)
         return (None, str(exc))
+    except OSError:
+        _cleanup_partial_files(full_dir, filename, thumb_filename)
+        _close_image(img)
+        _close_image(thumb)
+        return (None, "图片保存失败，请稍后重试")
     except Exception:
         # 处理失败时清理可能残留的文件，避免留下孤儿文件
         _cleanup_partial_files(full_dir, filename, thumb_filename)
+        _close_image(img)
+        _close_image(thumb)
         return (None, "图片处理失败")
+
+
+def _close_image(image):
+    if image is not None:
+        try:
+            image.close()
+        except Exception:
+            pass
 
 
 def _cleanup_partial_files(full_dir, filename, thumb_filename):
@@ -480,13 +606,73 @@ def _cleanup_partial_files(full_dir, filename, thumb_filename):
                     pass
 
 
-def delete_image_files(filename, thumb_filename):
-    """删除图片文件"""
+def delete_image_files(filename, thumb_filename, uploads_dir=None):
+    """删除图片文件，返回删除失败/非法路径的列表。
+
+    路径必须解析在指定上传目录内，避免数据库中的异常值导致删除任意服务器文件。
+    """
+    failures = []
     for fname in (filename, thumb_filename):
-        if fname:
-            fpath = os.path.join(UPLOADS_DIR, fname)
-            if os.path.exists(fpath):
-                try:
-                    os.remove(fpath)
-                except OSError:
-                    pass
+        if not fname:
+            continue
+        fpath = resolve_upload_path(
+            fname, must_exist=False, uploads_dir=uploads_dir or UPLOADS_DIR
+        )
+        if fpath is None:
+            failures.append(str(fname))
+            LOGGER.warning("拒绝删除非法上传路径: %s", fname)
+            continue
+        if not fpath.exists():
+            continue
+        try:
+            os.remove(fpath)
+        except OSError as exc:
+            failures.append(str(fname))
+            LOGGER.warning("删除上传文件失败 %s: %s", fname, exc)
+    return failures
+
+
+def promote_image_files(filename, thumb_filename, source_dir=None, target_dir=None):
+    """把待审图片从私有目录移动到公开目录；失败时回滚已移动的文件。
+
+    返回失败列表；空列表表示原图与缩略图都已在目标目录（或无需移动）。
+    """
+    source_base = source_dir or PRIVATE_UPLOADS_DIR
+    target_base = target_dir or UPLOADS_DIR
+    failures = []
+    moved = []
+
+    for fname in (filename, thumb_filename):
+        if not fname:
+            continue
+        src = resolve_upload_path(fname, must_exist=False, uploads_dir=source_base)
+        dst = resolve_upload_path(fname, must_exist=False, uploads_dir=target_base)
+        if src is None or dst is None:
+            failures.append(str(fname))
+            LOGGER.warning("拒绝移动非法上传路径: %s", fname)
+            continue
+        if src.exists() and dst.exists():
+            failures.append(str(fname))
+            LOGGER.warning("目标文件已存在，拒绝覆盖: %s", fname)
+            continue
+        if src.exists():
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(dst))
+                moved.append((src, dst))
+            except OSError as exc:
+                failures.append(str(fname))
+                LOGGER.warning("移动上传文件失败 %s: %s", fname, exc)
+        elif not dst.exists():
+            failures.append(str(fname))
+            LOGGER.warning("待审图片文件不存在: %s", fname)
+
+    if failures:
+        for src, dst in reversed(moved):
+            try:
+                if dst.exists() and not src.exists():
+                    src.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(dst), str(src))
+            except OSError as exc:
+                LOGGER.warning("回滚上传文件失败 %s: %s", dst, exc)
+    return failures

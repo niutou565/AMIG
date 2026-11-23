@@ -1,9 +1,12 @@
 import hashlib
+import re
+import sqlite3
 import time
 import uuid
 import contextvars
 from datetime import datetime, timezone, timedelta
 from app.database import get_db
+from app.config import VIEW_DEDUP_WINDOW
 
 # 当前请求的管理员 IP（由 admin 路由设置，供日志记录使用）
 _current_admin_ip = contextvars.ContextVar("current_admin_ip", default="")
@@ -49,7 +52,7 @@ def insert_image(filename, thumb_filename, original_size, compressed_size,
                  width, height, description, author, content_md5,
                  ip, ua, ua_hash_val, province, city, is_dup=0, title="", region=""):
     db = get_db()
-    db.execute(
+    cursor = db.execute(
         """INSERT INTO images (filename, thumb_filename, original_size, compressed_size,
            width, height, description, title, author, content_md5, ip, ua, ua_hash,
            province, city, region, status, created_at, is_duplicate)
@@ -58,8 +61,11 @@ def insert_image(filename, thumb_filename, original_size, compressed_size,
          width, height, description, title, author, content_md5, ip, ua, ua_hash_val,
          province, city, region, now_iso(), is_dup)
     )
+    # 必须在 commit 之前取 lastrowid：committed 之后在同一连接上再查询虽然可行，
+    # 但多 worker/多连接场景下语义不明确，直接使用 cursor.lastrowid 更可靠。
+    new_id = cursor.lastrowid
     db.commit()
-    return db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    return new_id
 
 
 def get_image_by_id(image_id):
@@ -80,10 +86,28 @@ _ALLOWED_ORDER_BY = {
     "views DESC",
 }
 
+# 分页参数统一夹取上限：避免 page=-1 产生负 OFFSET（SQLite 会当 0 处理，
+# 但调用方的 total_pages 计算会出现负数页），以及 limit 过大导致一次扫描整表。
+_MAX_PAGE_LIMIT = 200
+
+
+def _clamp_page(limit, offset, max_limit=_MAX_PAGE_LIMIT):
+    """把 limit/offset 收敛到安全范围，非法值回退到默认。"""
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 24
+    try:
+        offset = int(offset)
+    except (TypeError, ValueError):
+        offset = 0
+    return max(1, min(limit, max_limit)), max(0, offset)
+
 
 def get_images_by_status(status, limit=24, offset=0, order_by="created_at DESC"):
     if order_by not in _ALLOWED_ORDER_BY:
         order_by = "created_at DESC"
+    limit, offset = _clamp_page(limit, offset)
     return get_db().execute(
         f"SELECT * FROM images WHERE status=? ORDER BY {order_by} LIMIT ? OFFSET ?",
         (status, limit, offset)
@@ -110,10 +134,9 @@ def get_random_approved_images(limit=12):
         return db.execute(
             "SELECT * FROM images WHERE status='approved' ORDER BY reviewed_at DESC"
         ).fetchall()
-    # 随机种子取数
+    # 随机起点覆盖全部可选的连续窗口；旧实现只在首段取样，后面的图片几乎不会出现在首页
     import random
-    step = max(1, total // limit)
-    start = random.randint(0, step - 1)
+    start = random.randint(0, total - limit)
     return db.execute(
         "SELECT * FROM images WHERE status='approved' LIMIT ? OFFSET ?",
         (limit, start)
@@ -149,24 +172,126 @@ def get_random_image_prefer_low_heat(exclude_id=None):
     return row
 
 
+# 搜索关键词长度上限：与标题长度（100）对齐，避免超长输入构造巨大 LIKE 模式。
+MAX_SEARCH_QUERY_LENGTH = 100
+# 多关键词搜索的词数上限：避免一次搜索构造过多 LIKE 条件拖慢查询
+MAX_SEARCH_TERMS = 5
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def normalize_search_query(raw) -> str:
+    """规范化搜索关键词：去首尾空白、合并连续空白、截断超长输入。
+
+    用户在搜索框里粘贴带换行/多个空格的文本时，直接拼进 LIKE 模式会
+    因为多余空白而匹配不到；统一收敛为单个空格更符合直觉。
+    """
+    if not raw:
+        return ""
+    text = _WHITESPACE_RE.sub(" ", str(raw)).strip()
+    return text[:MAX_SEARCH_QUERY_LENGTH]
+
+
+def split_search_terms(q):
+    """把规范化后的关键词按空格拆分为检索词，最多取前 5 个。
+
+    单个词时保持原有的“整段子串匹配”；多个词时按 AND 语义处理，
+    每个词都必须命中标题/简介/署名之一。
+    """
+    return [term for term in q.split(" ") if term][:MAX_SEARCH_TERMS]
+
+
+def _like_pattern(text):
+    """把关键词转成 LIKE 模式，并转义 % _ \\ 三个通配/转义字符。
+
+    必须配合 SQL 中的 ESCAPE '\\' 使用，否则用户输入 "%" 会匹配全部记录。
+    """
+    escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def _multi_term_condition(patterns):
+    """多关键词的 AND 条件：每个词都必须命中标题/简介/署名之一。"""
+    return " AND ".join(
+        "(title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\' "
+        "OR author LIKE ? ESCAPE '\\')"
+        for _ in patterns
+    )
+
+
 def search_approved_images(query, limit=24, offset=0):
     db = get_db()
-    q = f"%{query}%"
+    limit, offset = _clamp_page(limit, offset)
+    q = normalize_search_query(query)
+    if not q:
+        # 空关键词等价于浏览全部已通过图片（与旧版 LIKE '%%' 的行为保持一致）
+        return db.execute(
+            """SELECT * FROM images WHERE status='approved'
+               ORDER BY reviewed_at DESC, id DESC LIMIT ? OFFSET ?""",
+            (limit, offset)
+        ).fetchall()
+    terms = split_search_terms(q)
+    if len(terms) > 1:
+        patterns = [_like_pattern(term) for term in terms]
+        # 相关度：标题命中词数多的优先；有署名命中的排在仅简介命中之前
+        title_hits = " + ".join(
+            "CASE WHEN title LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END" for _ in patterns
+        )
+        author_hit = " OR ".join("author LIKE ? ESCAPE '\\'" for _ in patterns)
+        sql = (
+            f"SELECT * FROM images WHERE status='approved' "
+            f"AND {_multi_term_condition(patterns)} "
+            f"ORDER BY ({title_hits}) DESC, "
+            f"CASE WHEN ({author_hit}) THEN 1 ELSE 0 END DESC, "
+            f"reviewed_at DESC, id DESC LIMIT ? OFFSET ?"
+        )
+        params = []
+        for pattern in patterns:
+            params.extend([pattern, pattern, pattern])
+        params.extend(patterns)
+        params.extend(patterns)
+        params.extend([limit, offset])
+        return db.execute(sql, params).fetchall()
+    pattern = _like_pattern(q)
+    # 排序：标题命中 > 署名命中 > 简介命中；同层内按审核时间倒序，
+    # 并以 id 兜底，保证同一审核时间（批量通过）下翻页不会重复或漏行。
     return db.execute(
         """SELECT * FROM images WHERE status='approved'
-           AND (title LIKE ? OR description LIKE ? OR author LIKE ?)
-           ORDER BY reviewed_at DESC LIMIT ? OFFSET ?""",
-        (q, q, q, limit, offset)
+           AND (title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\'
+                OR author LIKE ? ESCAPE '\\')
+           ORDER BY
+             CASE
+               WHEN title LIKE ? ESCAPE '\\' THEN 3
+               WHEN author LIKE ? ESCAPE '\\' THEN 2
+               ELSE 1
+             END DESC,
+             reviewed_at DESC, id DESC
+           LIMIT ? OFFSET ?""",
+        (pattern, pattern, pattern, pattern, pattern, limit, offset)
     ).fetchall()
 
 
 def count_search_approved_images(query):
     db = get_db()
-    q = f"%{query}%"
+    q = normalize_search_query(query)
+    if not q:
+        return count_images_by_status("approved")
+    terms = split_search_terms(q)
+    if len(terms) > 1:
+        patterns = [_like_pattern(term) for term in terms]
+        params = []
+        for pattern in patterns:
+            params.extend([pattern, pattern, pattern])
+        return db.execute(
+            "SELECT COUNT(*) FROM images WHERE status='approved' "
+            f"AND {_multi_term_condition(patterns)}",
+            params,
+        ).fetchone()[0]
+    pattern = _like_pattern(q)
     return db.execute(
         """SELECT COUNT(*) FROM images WHERE status='approved'
-           AND (title LIKE ? OR description LIKE ? OR author LIKE ?)""",
-        (q, q, q)
+           AND (title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\'
+                OR author LIKE ? ESCAPE '\\')""",
+        (pattern, pattern, pattern)
     ).fetchone()[0]
 
 
@@ -205,24 +330,80 @@ def update_image_status(image_id, status, reject_reason=None, admin_id=None,
         insert_admin_log(admin_id, admin_name, action, detail, f"image#{image_id}")
 
 
-def update_image_content(image_id, title, description, admin_id=None, admin_name=None):
-    """更新图片标题和简介并标记为管理员编辑过"""
+def rollback_image_to_pending(image_id):
+    """文件移动失败时把审核状态回滚为待审核，避免出现已发布但文件不可用。"""
     db = get_db()
     db.execute(
-        "UPDATE images SET title=?, description=?, admin_edited=1 WHERE id=?",
-        (title, description, image_id)
+        "UPDATE images SET status='pending', reviewed_at=NULL WHERE id=?",
+        (image_id,),
     )
+    db.commit()
+
+
+def try_approve_image(image_id, admin_id=None, admin_name=None,
+                      description=None, author=None, title=None):
+    """条件审核通过：仅当图片当前不是 approved 时才更新，返回是否发生状态转换。
+
+    用 SQL 条件更新代替“先查后改”，多个管理员/多个 worker 并发审核同一张图片时，
+    只有一个请求会得到 True，从而避免重复移动文件与重复统计。
+    """
+    db = get_db()
+    now = now_iso()
+    admin_edited = 1 if (description is not None or author is not None or title is not None) else 0
+    fields = ["status=?", "reviewed_at=?", "admin_edited=?"]
+    params = ["approved", now, admin_edited]
+    if description is not None:
+        fields.append("description=?")
+        params.append(description)
+    if title is not None:
+        fields.append("title=?")
+        params.append(title)
+    if author is not None:
+        fields.append("author=?")
+        params.append(author)
+    params.append(image_id)
+    cursor = db.execute(
+        f"UPDATE images SET {', '.join(fields)} WHERE id=? AND status != 'approved'",
+        params,
+    )
+    db.commit()
+    changed = cursor.rowcount > 0
+    if changed and admin_id:
+        detail = "编辑了内容" if admin_edited else ""
+        insert_admin_log(admin_id, admin_name, "approve", detail, f"image#{image_id}")
+    return changed
+
+
+def update_image_content(image_id, title, description, admin_id=None, admin_name=None,
+                         author=None):
+    """更新图片标题、简介（可选作者）并标记为管理员编辑过"""
+    db = get_db()
+    if author is None:
+        db.execute(
+            "UPDATE images SET title=?, description=?, admin_edited=1 WHERE id=?",
+            (title, description, image_id)
+        )
+    else:
+        db.execute(
+            "UPDATE images SET title=?, description=?, author=?, admin_edited=1 WHERE id=?",
+            (title, description, author, image_id)
+        )
     db.commit()
     if admin_id:
         insert_admin_log(admin_id, admin_name, "edit", "编辑图片标题/简介", f"image#{image_id}")
 
 
 def delete_image(image_id):
+    """删除图片记录；返回被删除行的 (filename, thumb_filename) 或 None。
+
+    返回 None 表示记录已不存在（例如被另一个管理员并发删除），
+    调用方据此避免重复统计和重复删除文件。
+    """
     db = get_db()
     img = db.execute("SELECT filename, thumb_filename FROM images WHERE id=?", (image_id,)).fetchone()
-    db.execute("DELETE FROM images WHERE id=?", (image_id,))
+    cursor = db.execute("DELETE FROM images WHERE id=?", (image_id,))
     db.commit()
-    return img
+    return img if cursor.rowcount > 0 else None
 
 
 def increment_view(image_id):
@@ -279,8 +460,41 @@ def insert_like(image_id, ip, ua_hash_val, province, city):
         )
         db.commit()
         return True
-    except Exception:
-        return False  # 唯一索引冲突，已赞过
+    except sqlite3.IntegrityError:
+        # 唯一索引冲突：同一 IP + UA 已赞过。
+        # 必须回滚，否则线程本地连接上会残留未结束的写事务并长期持有写锁。
+        db.rollback()
+        return False
+
+
+def add_like_atomic(image_id, ip, ua_hash_val, province, city, date_str=None):
+    """点赞写库的原子版本：点赞行、图片计数、日统计在同一事务内提交。
+
+    任何一步失败都会整体回滚，避免“有点赞行但计数没增加”之类的漂移。
+    唯一索引冲突（重复点赞）时回滚 SAVEPOINT 并返回 False，不影响连接上的其他操作。
+    """
+    from app.database import transaction
+    if date_str is None:
+        date_str = today_str()
+    db = get_db()
+    with transaction():
+        try:
+            db.execute(
+                "INSERT INTO likes (image_id, ip, ua_hash, province, city, created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (image_id, ip, ua_hash_val, province, city, now_iso())
+            )
+        except sqlite3.IntegrityError:
+            return False
+        db.execute(
+            "UPDATE images SET like_count = like_count + 1 WHERE id=?", (image_id,)
+        )
+        db.execute(
+            "INSERT INTO daily_stats (date, like_count) VALUES (?, 1) "
+            "ON CONFLICT(date) DO UPDATE SET like_count = like_count + 1",
+            (date_str,),
+        )
+    return True
 
 
 def has_liked(image_id, ip, ua_hash_val):
@@ -291,6 +505,7 @@ def has_liked(image_id, ip, ua_hash_val):
 
 
 def get_likes_by_image(image_id, limit=20, offset=0):
+    limit, offset = _clamp_page(limit, offset)
     return get_db().execute(
         "SELECT * FROM likes WHERE image_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?",
         (image_id, limit, offset)
@@ -315,17 +530,28 @@ def delete_like(like_id):
 
 
 def delete_likes_by_ids(like_ids):
-    """批量删除点赞记录"""
+    """批量删除点赞记录，并在同一事务内同步 images.like_count。
+
+    旧实现逐条调用 decrement_like_count（内部 commit），删除与计数更新不是
+    一个原子操作；这里改为单事务内完成，避免中途失败造成计数漂移。
+    """
+    if not like_ids:
+        return
+    from app.database import transaction
     db = get_db()
     id_list = ",".join("?" for _ in like_ids)
-    likes = db.execute(
-        f"SELECT image_id, COUNT(*) as cnt FROM likes WHERE id IN ({id_list}) GROUP BY image_id",
-        like_ids
-    ).fetchall()
-    db.execute(f"DELETE FROM likes WHERE id IN ({id_list})", like_ids)
-    for row in likes:
-        decrement_like_count(row["image_id"], row["cnt"])
-    db.commit()
+    with transaction():
+        likes = db.execute(
+            f"SELECT image_id, COUNT(*) as cnt FROM likes WHERE id IN ({id_list}) "
+            "GROUP BY image_id",
+            like_ids
+        ).fetchall()
+        db.execute(f"DELETE FROM likes WHERE id IN ({id_list})", like_ids)
+        for row in likes:
+            db.execute(
+                "UPDATE images SET like_count = MAX(0, like_count - ?) WHERE id=?",
+                (row["cnt"], row["image_id"]),
+            )
 
 
 def count_likes_by_ip_last_minute(ip):
@@ -410,6 +636,17 @@ def remove_ban(ban_id):
     _invalidate_cidr_cache()
 
 
+def get_image_by_any_filename(value):
+    """按原图或缩略图相对路径查询图片记录（供受控文件访问使用）。"""
+    if not value:
+        return None
+    return get_db().execute(
+        "SELECT id, filename, thumb_filename, status "
+        "FROM images WHERE filename=? OR thumb_filename=? LIMIT 1",
+        (value, value),
+    ).fetchone()
+
+
 # ========== admins ==========
 
 def get_admin_by_username(username):
@@ -430,8 +667,12 @@ def update_admin_login_attempts(admin_id, attempts, locked_until=None):
 
 
 def update_admin_password(admin_id, password_hash):
+    """更新密码哈希，同时清除失败统计与旧锁定状态。"""
     db = get_db()
-    db.execute("UPDATE admins SET password_hash=? WHERE id=?", (password_hash, admin_id))
+    db.execute(
+        "UPDATE admins SET password_hash=?, login_attempts=0, locked_until=NULL WHERE id=?",
+        (password_hash, admin_id),
+    )
     db.commit()
 
 
@@ -475,6 +716,13 @@ def get_visible_pages():
 def get_page_by_slug(slug):
     return get_db().execute(
         "SELECT * FROM pages WHERE slug=? AND is_visible=1", (slug,)
+    ).fetchone()
+
+
+def get_page_by_slug_any(slug):
+    """按 slug 查询页面（不限制可见状态），供后台校验唯一性使用。"""
+    return get_db().execute(
+        "SELECT * FROM pages WHERE slug=?", (slug,)
     ).fetchone()
 
 
@@ -560,11 +808,16 @@ _ALLOWED_STAT_FIELDS = {"upload_count", "approved_count", "rejected_count", "lik
 
 
 def increment_daily_stat(date_str, field):
+    """原子递增日统计：单条 UPSERT 完成“建当天行 + 加一”，避免两次提交的竞态。"""
     if field not in _ALLOWED_STAT_FIELDS:
         raise ValueError(f"非法统计字段: {field}")
-    ensure_daily_stats(date_str)
     db = get_db()
-    db.execute(f"UPDATE daily_stats SET {field} = {field} + 1 WHERE date=?", (date_str,))
+    # 字段名来自白名单校验，值用参数传递，不存在 SQL 注入面
+    db.execute(
+        f"INSERT INTO daily_stats (date, {field}) VALUES (?, 1) "
+        f"ON CONFLICT(date) DO UPDATE SET {field} = {field} + 1",
+        (date_str,),
+    )
     db.commit()
 
 
@@ -639,6 +892,34 @@ def insert_admin_log(admin_id, admin_name, action, detail="", target="", ip=None
     db.commit()
 
 
+def _admin_log_where(action=None, ip=None, query=None, date_from=None, date_to=None):
+    """构造操作日志筛选条件，搜索与计数共用，避免两处条件不一致。"""
+    conditions = []
+    params = []
+    if action:
+        conditions.append("action = ?")
+        params.append(action)
+    ip_text = normalize_search_query(ip)
+    if ip_text:
+        conditions.append("ip LIKE ? ESCAPE '\\'")
+        params.append(_like_pattern(ip_text))
+    q = normalize_search_query(query)
+    if q:
+        pattern = _like_pattern(q)
+        conditions.append(
+            "(detail LIKE ? ESCAPE '\\' OR target LIKE ? ESCAPE '\\' "
+            "OR admin_name LIKE ? ESCAPE '\\')"
+        )
+        params.extend([pattern, pattern, pattern])
+    if date_from:
+        conditions.append("created_at >= ?")
+        params.append(date_from)
+    if date_to:
+        conditions.append("created_at <= ?")
+        params.append(date_to)
+    return (" AND ".join(conditions) if conditions else "1=1"), params
+
+
 def search_admin_logs(action=None, ip=None, query=None,
                       date_from=None, date_to=None, limit=50, offset=0):
     """搜索操作日志。
@@ -647,27 +928,11 @@ def search_admin_logs(action=None, ip=None, query=None,
     便于通过图片编号（如 image#123）、操作详情等灵活检索。
     """
     db = get_db()
-    conditions = []
-    params = []
-    if action:
-        conditions.append("action = ?")
-        params.append(action)
-    if ip:
-        conditions.append("ip LIKE ?")
-        params.append(f"%{ip}%")
-    if query:
-        conditions.append("(detail LIKE ? OR target LIKE ? OR admin_name LIKE ?)")
-        q = f"%{query}%"
-        params.extend([q, q, q])
-    if date_from:
-        conditions.append("created_at >= ?")
-        params.append(date_from)
-    if date_to:
-        conditions.append("created_at <= ?")
-        params.append(date_to)
-    where = " AND ".join(conditions) if conditions else "1=1"
+    where, params = _admin_log_where(action, ip, query, date_from, date_to)
+    limit, offset = _clamp_page(limit, offset)
+    # 同一秒内的多条日志以 id 倒序兜底，避免翻页时重复或漏行
     return db.execute(
-        f"SELECT * FROM admin_logs WHERE {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        f"SELECT * FROM admin_logs WHERE {where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
         params + [limit, offset]
     ).fetchall()
 
@@ -675,47 +940,35 @@ def search_admin_logs(action=None, ip=None, query=None,
 def count_admin_logs(action=None, ip=None, query=None,
                      date_from=None, date_to=None):
     db = get_db()
-    conditions = []
-    params = []
-    if action:
-        conditions.append("action = ?")
-        params.append(action)
-    if ip:
-        conditions.append("ip LIKE ?")
-        params.append(f"%{ip}%")
-    if query:
-        conditions.append("(detail LIKE ? OR target LIKE ? OR admin_name LIKE ?)")
-        q = f"%{query}%"
-        params.extend([q, q, q])
-    if date_from:
-        conditions.append("created_at >= ?")
-        params.append(date_from)
-    if date_to:
-        conditions.append("created_at <= ?")
-        params.append(date_to)
-    where = " AND ".join(conditions) if conditions else "1=1"
+    where, params = _admin_log_where(action, ip, query, date_from, date_to)
     return db.execute(f"SELECT COUNT(*) FROM admin_logs WHERE {where}", params).fetchone()[0]
 
 
 # ========== view_sessions ==========
 
 def should_count_view(image_id, ip):
-    """检查是否10分钟内重复浏览"""
-    from datetime import datetime, timezone, timedelta
-    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=600)).isoformat(timespec="seconds")
+    """检查是否在去重窗口内重复浏览。
+
+    先做一次只读判断：窗口内已浏览过则直接返回 False，避免高频重复浏览
+    每次都开启写事务（WAL 下每次提交都要落盘）。只有需要计数时才执行
+    UPSERT，仍由 (image_id, ip) 唯一索引保证并发请求只有一个成功。
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=VIEW_DEDUP_WINDOW)).isoformat(timespec="seconds")
     db = get_db()
     existing = db.execute(
-        "SELECT id FROM view_sessions WHERE image_id=? AND ip=? AND viewed_at > ?",
-        (image_id, ip, cutoff)
+        "SELECT viewed_at FROM view_sessions WHERE image_id=? AND ip=?",
+        (image_id, ip),
     ).fetchone()
-    if existing:
+    if existing and str(existing["viewed_at"]) > cutoff:
         return False
-    db.execute(
-        "INSERT INTO view_sessions (image_id, ip, viewed_at) VALUES (?,?,?)",
-        (image_id, ip, now_iso())
+    cursor = db.execute(
+        "INSERT INTO view_sessions (image_id, ip, viewed_at) VALUES (?,?,?) "
+        "ON CONFLICT(image_id, ip) DO UPDATE SET viewed_at=excluded.viewed_at "
+        "WHERE view_sessions.viewed_at <= ?",
+        (image_id, ip, now_iso(), cutoff),
     )
     db.commit()
-    return True
+    return cursor.rowcount > 0
 
 
 # ========== cooling ==========
@@ -728,21 +981,21 @@ def get_cooldown_multiplier(ip):
 
 
 def increment_reject_cooldown(ip):
+    """拒绝冷却 +1，倍率翻倍（上限 16）。
+
+    使用 SQL 侧 UPSERT 算术，避免“先 SELECT 再 UPDATE”在多 worker 下丢更新。
+    """
     db = get_db()
     now = now_iso()
-    row = db.execute("SELECT reject_count, cooldown_multiplier FROM cooling WHERE ip=?", (ip,)).fetchone()
-    if row:
-        new_count = row["reject_count"] + 1
-        new_mult = min(row["cooldown_multiplier"] * 2, 16)
-        db.execute(
-            "UPDATE cooling SET reject_count=?, cooldown_multiplier=?, updated_at=? WHERE ip=?",
-            (new_count, new_mult, now, ip)
-        )
-    else:
-        db.execute(
-            "INSERT INTO cooling (ip, reject_count, cooldown_multiplier, updated_at) VALUES (?,1,1,?)",
-            (ip, now)
-        )
+    db.execute(
+        "INSERT INTO cooling (ip, reject_count, cooldown_multiplier, updated_at) "
+        "VALUES (?, 1, 1, ?) "
+        "ON CONFLICT(ip) DO UPDATE SET "
+        "reject_count = reject_count + 1, "
+        "cooldown_multiplier = MIN(cooldown_multiplier * 2, 16), "
+        "updated_at = excluded.updated_at",
+        (ip, now),
+    )
     db.commit()
 
 
@@ -825,19 +1078,21 @@ def get_last_upload_time(ip):
 def search_images_admin(status=None, query=None, limit=24, offset=0, order_by="created_at DESC"):
     if order_by not in _ALLOWED_ORDER_BY:
         order_by = "created_at DESC"
+    limit, offset = _clamp_page(limit, offset)
     db = get_db()
     conditions = []
     params = []
     if status:
         conditions.append("status = ?")
         params.append(status)
-    if query:
-        conditions.append("(title LIKE ? OR description LIKE ? OR author LIKE ? OR ip LIKE ? OR province LIKE ? OR city LIKE ?)")
-        q = f"%{query}%"
-        params.extend([q, q, q, q, q, q])
+    cond, cond_params = _admin_image_search_condition(query)
+    if cond:
+        conditions.append(cond)
+        params.extend(cond_params)
     where = " AND ".join(conditions) if conditions else "1=1"
+    # 以 id 兜底排序，保证同秒创建的多张图片翻页时顺序稳定
     return db.execute(
-        f"SELECT * FROM images WHERE {where} ORDER BY {order_by} LIMIT ? OFFSET ?",
+        f"SELECT * FROM images WHERE {where} ORDER BY {order_by}, id DESC LIMIT ? OFFSET ?",
         params + [limit, offset]
     ).fetchall()
 
@@ -849,12 +1104,28 @@ def count_images_admin(status=None, query=None):
     if status:
         conditions.append("status = ?")
         params.append(status)
-    if query:
-        conditions.append("(title LIKE ? OR description LIKE ? OR author LIKE ? OR ip LIKE ? OR province LIKE ? OR city LIKE ?)")
-        q = f"%{query}%"
-        params.extend([q, q, q, q, q, q])
+    cond, cond_params = _admin_image_search_condition(query)
+    if cond:
+        conditions.append(cond)
+        params.extend(cond_params)
     where = " AND ".join(conditions) if conditions else "1=1"
     return db.execute(f"SELECT COUNT(*) FROM images WHERE {where}", params).fetchone()[0]
+
+
+# 后台图片搜索字段：标题/简介/署名/上传 IP/归属地
+_ADMIN_IMAGE_SEARCH_COLUMNS = ("title", "description", "author", "ip", "province", "city")
+
+
+def _admin_image_search_condition(query):
+    """构造后台图片搜索的 WHERE 片段，搜索与计数共用，避免两处条件不一致。"""
+    q = normalize_search_query(query)
+    if not q:
+        return None, []
+    pattern = _like_pattern(q)
+    condition = "(" + " OR ".join(
+        f"{col} LIKE ? ESCAPE '\\'" for col in _ADMIN_IMAGE_SEARCH_COLUMNS
+    ) + ")"
+    return condition, [pattern] * len(_ADMIN_IMAGE_SEARCH_COLUMNS)
 
 
 def batch_update_status(ids, status, admin_id, admin_name):

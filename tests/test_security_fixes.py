@@ -8,6 +8,7 @@ import shutil
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone, timedelta
 from html.parser import HTMLParser
 from unittest.mock import patch
 
@@ -111,7 +112,7 @@ class TestPixelLimit(unittest.TestCase):
                  patch.object(image_utils, "_atomic_write", side_effect=flaky_write):
                 result, error = image_utils.process_image(data)
             self.assertIsNone(result)
-            self.assertEqual(error, "图片处理失败")
+            self.assertIn("保存失败", error)
             self.assertEqual(_list_files(tmpdir), set())
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -178,33 +179,54 @@ class TestLogoSave(unittest.TestCase):
         self.assertEqual(_list_files(self.tmpdir), set())
 
 
-class TestLoginIpCleanup(unittest.TestCase):
-    """登录 IP 限流缓存应清理过期记录"""
+class TestLoginRateLimit(unittest.TestCase):
+    """数据库共享的登录失败限流：阈值、过期清理与成功复位"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = tempfile.mkdtemp(prefix="amig-rate-")
+        cls._orig_db = database.DATABASE_PATH
+        database.close_db()
+        database.DATABASE_PATH = os.path.join(cls.tmpdir, "app.db")
+        database.init_db()
+
+    @classmethod
+    def tearDownClass(cls):
+        database.close_db()
+        database.DATABASE_PATH = cls._orig_db
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
 
     def setUp(self):
-        with auth._login_ip_lock:
-            auth._login_ip_attempts.clear()
-            auth._last_login_ip_cleanup = 0.0
+        auth.clear_login_rate_limits()
 
     def tearDown(self):
-        with auth._login_ip_lock:
-            auth._login_ip_attempts.clear()
-            auth._last_login_ip_cleanup = 0.0
+        auth.clear_login_rate_limits()
 
-    def test_cleanup_removes_expired_entries(self):
-        now = time.time()
-        auth._login_ip_attempts["old-ip"] = [2, now - auth._LOGIN_IP_WINDOW_SECONDS - 1]
-        auth._login_ip_attempts["fresh-ip"] = [1, now]
-        auth._cleanup_login_ip_attempts(now)
-        self.assertNotIn("old-ip", auth._login_ip_attempts)
-        self.assertIn("fresh-ip", auth._login_ip_attempts)
+    def test_failure_threshold_blocks_and_success_resets(self):
+        for _ in range(auth.LOGIN_IP_MAX_ATTEMPTS):
+            auth.record_login_failure("10.1.1.1")
+        self.assertTrue(auth.is_login_ip_blocked("10.1.1.1"))
+        auth.reset_login_ip_limit("10.1.1.1")
+        self.assertFalse(auth.is_login_ip_blocked("10.1.1.1"))
 
-    def test_periodic_cleanup_triggered_by_limit_check(self):
-        now = time.time()
-        auth._login_ip_attempts["expired-ip"] = [1, now - auth._LOGIN_IP_WINDOW_SECONDS - 1]
-        auth._last_login_ip_cleanup = 0.0
-        self.assertTrue(auth.check_login_ip_limit("new-ip"))
-        self.assertNotIn("expired-ip", auth._login_ip_attempts)
+    def test_expired_window_is_cleaned_and_not_blocked(self):
+        conn = database.get_db()
+        expired = (
+            datetime.now(timezone.utc)
+            - timedelta(minutes=auth.LOGIN_IP_WINDOW_MINUTES + 1)
+        ).isoformat(timespec="seconds")
+        conn.execute(
+            "INSERT INTO login_rate_limits (key, attempts, window_start, updated_at) VALUES (?,?,?,?)",
+            ("ip:old-ip", auth.LOGIN_IP_MAX_ATTEMPTS, expired, expired),
+        )
+        conn.commit()
+        self.assertFalse(auth.is_login_ip_blocked("old-ip"))
+        auth.record_login_failure("new-ip")
+        self.assertIsNone(
+            conn.execute(
+                "SELECT 1 FROM login_rate_limits WHERE key='ip:old-ip'"
+            ).fetchone()
+        )
 
 
 class TestSecurityIntegration(unittest.TestCase):
@@ -215,13 +237,18 @@ class TestSecurityIntegration(unittest.TestCase):
         cls.tmpdir = tempfile.mkdtemp(prefix="amig-sec-")
         cls.db_path = os.path.join(cls.tmpdir, "app.db")
         cls.upload_dir = os.path.join(cls.tmpdir, "uploads")
+        cls.private_dir = os.path.join(cls.tmpdir, "private_uploads")
         cls._orig_db = database.DATABASE_PATH
         cls._orig_uploads = image_utils.UPLOADS_DIR
+        cls._orig_private = image_utils.PRIVATE_UPLOADS_DIR
         cls._orig_admin_uploads = admin_routes.UPLOADS_DIR
         database.close_db()
         database.DATABASE_PATH = cls.db_path
         image_utils.UPLOADS_DIR = cls.upload_dir
+        image_utils.PRIVATE_UPLOADS_DIR = cls.private_dir
         admin_routes.UPLOADS_DIR = cls.upload_dir
+        os.makedirs(cls.upload_dir, exist_ok=True)
+        os.makedirs(cls.private_dir, exist_ok=True)
         database.init_db()
         models.set_setting("admin_domain", "admin.test")
         models.set_setting("enable_captcha", "0")
@@ -232,6 +259,7 @@ class TestSecurityIntegration(unittest.TestCase):
         database.close_db()
         database.DATABASE_PATH = cls._orig_db
         image_utils.UPLOADS_DIR = cls._orig_uploads
+        image_utils.PRIVATE_UPLOADS_DIR = cls._orig_private
         admin_routes.UPLOADS_DIR = cls._orig_admin_uploads
         shutil.rmtree(cls.tmpdir, ignore_errors=True)
 
@@ -255,7 +283,7 @@ class TestSecurityIntegration(unittest.TestCase):
         ).fetchone()["id"]
 
     def login(self, client, username, password):
-        auth._login_ip_attempts.clear()
+        auth.clear_login_rate_limits()
         page = client.get("/admin/login")
         self.assertEqual(page.status_code, 200)
         result = client.post(
@@ -373,16 +401,23 @@ class TestSecurityIntegration(unittest.TestCase):
         self.assertIn("data.linkName", script_body)
 
     def test_change_password_revokes_other_sessions_and_reissues(self):
-        admin_id = self.add_admin("pwuser", "old-pass")
+        old_password = "Old-Password-123"
+        new_password = "New-Password-456"
+        admin_id = self.add_admin("pwuser", old_password)
         client = self.client()
-        old_session = self.login(client, "pwuser", "old-pass")
+        old_session = self.login(client, "pwuser", old_password)
         other_session = auth.create_session(admin_id, "pwuser")
 
         page = client.get("/admin/change-password")
         token = self.csrf(page)
         response = client.post(
             "/admin/change-password",
-            data={"csrf_token": token, "new_password": "new-pass", "confirm_password": "new-pass"},
+            data={
+                "csrf_token": token,
+                "current_password": old_password,
+                "new_password": new_password,
+                "confirm_password": new_password,
+            },
         )
         self.assertEqual(response.status_code, 200)
         self.assertIn("pwuser", response.text, "改密后页面丢失了当前管理员上下文")
@@ -460,7 +495,7 @@ class TestSecurityIntegration(unittest.TestCase):
 
     def test_upload_cleans_files_when_database_insert_fails(self):
         client = self.client("upload.test")
-        before = _list_files(self.upload_dir)
+        before = (_list_files(self.upload_dir), _list_files(self.private_dir))
         with patch.object(front, "get_client_ip", return_value="10.0.1.1"), \
              patch.object(front, "get_ip_location", return_value=("", "")), \
              patch.object(front, "get_ip_region", return_value=""), \
@@ -473,7 +508,9 @@ class TestSecurityIntegration(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 200)
         self.assertIn("保存失败", response.text)
-        self.assertEqual(_list_files(self.upload_dir), before)
+        self.assertEqual(
+            (_list_files(self.upload_dir), _list_files(self.private_dir)), before
+        )
 
     def _post_upload(self, client, ip, data, filename="sample.png", title="上传流程测试"):
         page = client.get("/upload")
@@ -499,8 +536,12 @@ class TestSecurityIntegration(unittest.TestCase):
         self.assertEqual(row["status"], "pending")
         for name in (row["filename"], row["thumb_filename"]):
             self.assertTrue(
-                os.path.isfile(os.path.join(self.upload_dir, name)),
-                f"上传成功但文件缺失：{name}",
+                os.path.isfile(os.path.join(self.private_dir, name)),
+                f"待审图片应保存在私有目录，但文件缺失：{name}",
+            )
+            self.assertFalse(
+                os.path.exists(os.path.join(self.upload_dir, name)),
+                f"待审图片不应出现在公开目录：{name}",
             )
 
     def test_upload_rejects_empty_file(self):

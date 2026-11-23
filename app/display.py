@@ -21,7 +21,7 @@ def location_label(province, city):
     return f"{province}{city}" if province or city else "未知地区"
 
 
-def safe_color(value, default="#6c5ce7"):
+def safe_color(value, default="#c9a063"):
     """清洗主题色，仅接受合法的十六进制颜色，防止 CSS/HTML 注入。"""
     v = str(value).strip() if value else ""
     if _SAFE_COLOR_RE.match(v):

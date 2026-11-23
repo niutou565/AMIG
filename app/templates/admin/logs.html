@@ -67,7 +67,9 @@
             </tr>
             {% else %}
             <tr>
-                <td colspan="6">暂无日志</td>
+                <td colspan="6">
+                    {% if q or action or ip or date_from or date_to %}没有找到匹配的日志，<a href="/admin/logs">清除筛选</a>{% else %}暂无日志{% endif %}
+                </td>
             </tr>
             {% endfor %}
         </tbody>

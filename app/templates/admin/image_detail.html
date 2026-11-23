@@ -5,10 +5,7 @@
 <a href="/admin/images" class="detail-back">&larr; 返回图片管理</a>
 <h1>图片详情 #{{ image.id }}</h1>
 
-{% if request.query_params.get('saved') %}
-<div class="alert alert-success" role="status">标题 / 简介已更新</div>
-{% endif %}
-{% if edit_error %}
+{% if edit_error and not edit_error_field %}
 <div class="alert alert-error" role="alert">{{ edit_error }}</div>
 {% endif %}
 
@@ -42,11 +39,17 @@
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="form-group">
             <label for="editTitle">标题 <span class="required">*</span>（最多 100 字）</label>
-            <input type="text" id="editTitle" name="title" value="{{ image.title or '' }}" maxlength="100" required>
+            <input type="text" id="editTitle" name="title" value="{{ image.title or '' }}" maxlength="100" required
+                   class="{% if edit_error_field == 'title' %}input-error{% endif %}"
+                   {% if edit_error_field == 'title' %}aria-invalid="true" aria-describedby="editTitleError"{% endif %}>
+            {% if edit_error_field == 'title' %}<p class="field-error" id="editTitleError">{{ edit_error }}</p>{% endif %}
         </div>
         <div class="form-group">
             <label for="editDesc">简介（最多 200 字）</label>
-            <textarea id="editDesc" name="description" rows="3" maxlength="200">{{ image.description or '' }}</textarea>
+            <textarea id="editDesc" name="description" rows="3" maxlength="200"
+                      class="{% if edit_error_field == 'description' %}input-error{% endif %}"
+                      {% if edit_error_field == 'description' %}aria-invalid="true" aria-describedby="editDescError"{% endif %}>{{ image.description or '' }}</textarea>
+            {% if edit_error_field == 'description' %}<p class="field-error" id="editDescError">{{ edit_error }}</p>{% endif %}
         </div>
         <div class="form-actions">
             <button type="submit" class="btn btn-primary">保存修改</button>
@@ -55,12 +58,12 @@
 </section>
 
 <div class="panel-head">
-    <h3 style="margin:0">点赞明细（{{ likes_count }}）</h3>
+    <h3 class="margin-0">点赞明细（{{ likes_count }}）</h3>
     {% if likes %}
     <form method="post" action="/admin/images/{{ image.id }}/clear-likes" id="clearLikesForm">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <input type="hidden" name="like_ids" id="clearLikeIds">
-        <button type="button" class="btn btn-sm btn-danger" onclick="clearSelectedLikes()">清除选中</button>
+        <button type="button" class="btn btn-sm btn-danger" id="clearSelectedLikesBtn">清除选中</button>
     </form>
     {% endif %}
 </div>
@@ -96,7 +99,7 @@
 {% endblock %}
 
 {% block scripts %}
-<script>
+<script nonce="{{ request.state.csp_nonce }}">
 document.getElementById('selectAllLikes')?.addEventListener('change', function() {
     document.querySelectorAll('.like-check').forEach(function (cb) { cb.checked = this.checked; });
 });
@@ -107,5 +110,6 @@ function clearSelectedLikes() {
     document.getElementById('clearLikeIds').value = ids.join(',');
     document.getElementById('clearLikesForm').submit();
 }
+document.getElementById('clearSelectedLikesBtn')?.addEventListener('click', clearSelectedLikes);
 </script>
 {% endblock %}

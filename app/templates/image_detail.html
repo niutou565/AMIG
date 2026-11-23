@@ -1,75 +1,108 @@
 {% extends "base.html" %}
-{% block title %}{{ image.title or image.description[:30] or '未命名' }} - {{ site_name }}{% endblock %}
+{% block title %}{{ image.title or (image.description or '')[:30] or '未命名' }} - {{ site_name }}{% endblock %}
 
 {% block content %}
-<article class="image-detail">
-    <a href="/gallery" class="detail-back">&larr; 返回图库</a>
-
-    <div class="detail-head">
-        <h1 class="detail-title">{{ image.title or '未命名' }}</h1>
-        {% if image.description %}<p class="detail-desc">{{ image.description }}</p>{% endif %}
-        <div class="detail-meta">
-            <span>{{ image|uploader_label }}</span>
-            <span>{{ image.created_at[:10] }}</span>
-            <span>{{ image.width }} × {{ image.height }}</span>
-            <span>{{ (image.compressed_size / 1024)|round|int }} KB</span>
-            <span>{{ image.views }} 次浏览</span>
-        </div>
-    </div>
-
-    <div class="detail-image-wrap">
-        <a href="/uploads/{{ image.filename }}" target="_blank" rel="noopener">
-            <img src="/uploads/{{ image.filename }}" alt="{{ image.title or image.description or '图片' }}"
-                 class="detail-image" decoding="async">
+<article class="detail">
+    <div class="detail-topbar">
+        <a href="/gallery" class="detail-back"><span aria-hidden="true">&larr;</span> 返回图库</a>
+        <a href="/uploads/{{ image.filename }}" target="_blank" rel="noopener" class="detail-original">
+            查看原图 <span aria-hidden="true">↗</span>
         </a>
     </div>
 
-    <div class="detail-actions like-section">
-        <button type="button" class="like-btn {% if has_liked %}liked{% endif %}" id="likeBtn"
-                data-image-id="{{ image.id }}" {% if has_liked %}title="每张图片只能点赞一次"{% endif %}>
-            <span class="like-icon" aria-hidden="true">&#10084;</span>
-            <span class="like-text" id="likeText">{% if has_liked %}已赞{% else %}点赞{% endif %}</span>
-            <span class="like-count-num" id="likeCount" aria-live="polite">{{ likes_count }}</span>
-        </button>
-        <button type="button" class="btn random-btn" id="randomBtn" data-image-id="{{ image.id }}">下一张随机图片</button>
-    </div>
+    <div class="detail-layout">
+        <figure class="detail-stage">
+            <a href="/uploads/{{ image.filename }}" target="_blank" rel="noopener" class="detail-image-link">
+                <img src="/uploads/{{ image.filename }}" alt="{{ image.title or image.description or '图片' }}"
+                     width="{{ image.width }}" height="{{ image.height }}"
+                     class="detail-image" decoding="async" fetchpriority="high">
+            </a>
+        </figure>
 
-    {% if likes %}
-    <section class="like-list">
-        <h3>最近点赞</h3>
-        {% for like in likes %}
-        <div class="like-item">
-            <span class="like-user">{{ like.province | location_label(like.city) }}的用户</span>
-            <span class="like-time">{{ like.created_at[:16] }}</span>
-        </div>
-        {% endfor %}
-    </section>
-    {% endif %}
+        <aside class="detail-side">
+            <div class="detail-head">
+                <h1 class="detail-title">{{ image.title or '未命名' }}</h1>
+                {% if image.description %}<p class="detail-desc">{{ image.description }}</p>{% endif %}
+            </div>
+
+            <dl class="detail-facts">
+                <div class="detail-fact">
+                    <dt>作者</dt>
+                    <dd>{{ image|uploader_label }}</dd>
+                </div>
+                <div class="detail-fact">
+                    <dt>上传</dt>
+                    <dd>{{ image.created_at[:10] }}</dd>
+                </div>
+                <div class="detail-fact">
+                    <dt>尺寸</dt>
+                    <dd>{{ image.width }} × {{ image.height }}</dd>
+                </div>
+                <div class="detail-fact">
+                    <dt>大小</dt>
+                    <dd>{{ (image.compressed_size / 1024)|round|int }} KB</dd>
+                </div>
+                <div class="detail-fact">
+                    <dt>浏览</dt>
+                    <dd>{{ image.views }}</dd>
+                </div>
+            </dl>
+
+            <div class="detail-actions like-section">
+                <button type="button" class="like-btn {% if has_liked %}liked{% endif %}" id="likeBtn"
+                        data-image-id="{{ image.id }}" aria-pressed="{{ 'true' if has_liked else 'false' }}"
+                        {% if has_liked %}title="每张图片只能点赞一次"{% endif %}>
+                    <span class="like-icon" aria-hidden="true">&#10084;</span>
+                    <span class="like-text" id="likeText">{% if has_liked %}已赞{% else %}点赞{% endif %}</span>
+                    <span class="like-count-num" id="likeCount" aria-live="polite">{{ likes_count }}</span>
+                </button>
+                <button type="button" class="btn random-btn" id="randomBtn" data-image-id="{{ image.id }}">下一张随机图片</button>
+            </div>
+
+            {% if likes %}
+            <section class="like-list">
+                <h3>最近点赞</h3>
+                <div class="like-items">
+                    {% for like in likes %}
+                    <div class="like-item">
+                        <span class="like-user">{{ like.province | location_label(like.city) }}的用户</span>
+                        <span class="like-time">{{ like.created_at[:16]|replace('T', ' ') }}</span>
+                    </div>
+                    {% endfor %}
+                </div>
+            </section>
+            {% endif %}
+        </aside>
+    </div>
 </article>
 {% endblock %}
 
 {% block scripts %}
-<script>
+<script nonce="{{ request.state.csp_nonce }}">
 (function() {
     const btn = document.getElementById('likeBtn');
     const randomBtn = document.getElementById('randomBtn');
 
     if (btn) {
         btn.addEventListener('click', async function() {
-            if (btn.classList.contains('liked') || btn.disabled) return;
+            if (btn.classList.contains('liked') || btn.disabled) {
+                amigToast('每张图片只能点赞一次');
+                return;
+            }
             btn.disabled = true;
             try {
                 const resp = await fetch('/api/like/' + btn.dataset.imageId, { method: 'POST' });
                 const data = await resp.json();
                 if (data.success) {
                     btn.classList.add('liked');
+                    btn.setAttribute('aria-pressed', 'true');
                     document.getElementById('likeText').textContent = '已赞';
                     document.getElementById('likeCount').textContent = data.like_count;
                 } else {
-                    alert(data.error || '点赞失败');
+                    amigToast(data.error || '点赞失败', 'error');
                 }
             } catch (e) {
-                alert('网络错误，请重试');
+                amigToast('网络错误，请重试', 'error');
             }
             btn.disabled = false;
         });
@@ -85,9 +118,9 @@
                     window.location.href = '/image/' + data.id;
                     return;
                 }
-                alert(data.error || '暂无更多图片');
+                amigToast(data.error || '暂无更多图片', 'error');
             } catch (e) {
-                alert('网络错误，请重试');
+                amigToast('网络错误，请重试', 'error');
             }
             randomBtn.disabled = false;
         });

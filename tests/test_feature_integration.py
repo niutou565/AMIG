@@ -25,11 +25,16 @@ class FeatureIntegrationTest(unittest.TestCase):
         cls.tmpdir = tempfile.mkdtemp(prefix="amig-test-")
         cls.db_path = os.path.join(cls.tmpdir, "app.db")
         cls.upload_dir = os.path.join(cls.tmpdir, "uploads")
+        cls.private_dir = os.path.join(cls.tmpdir, "private_uploads")
         cls.original_db_path = database.DATABASE_PATH
         cls.original_upload_dir = image_utils.UPLOADS_DIR
+        cls.original_private_dir = image_utils.PRIVATE_UPLOADS_DIR
         database.close_db()
         database.DATABASE_PATH = cls.db_path
         image_utils.UPLOADS_DIR = cls.upload_dir
+        image_utils.PRIVATE_UPLOADS_DIR = cls.private_dir
+        os.makedirs(cls.upload_dir, exist_ok=True)
+        os.makedirs(cls.private_dir, exist_ok=True)
         database.init_db()
         models.set_setting("admin_domain", "admin.test")
         models.set_setting("enable_captcha", "0")
@@ -45,6 +50,7 @@ class FeatureIntegrationTest(unittest.TestCase):
         database.close_db()
         database.DATABASE_PATH = cls.original_db_path
         image_utils.UPLOADS_DIR = cls.original_upload_dir
+        image_utils.PRIVATE_UPLOADS_DIR = cls.original_private_dir
         shutil.rmtree(cls.tmpdir, ignore_errors=True)
 
     def client(self, host="admin.test"):
@@ -56,7 +62,7 @@ class FeatureIntegrationTest(unittest.TestCase):
         return match.group(1)
 
     def login(self, client):
-        auth._login_ip_attempts.clear()
+        auth.clear_login_rate_limits()
         page = client.get("/admin/login")
         self.assertEqual(page.status_code, 200)
         token = self.csrf(page)
@@ -75,19 +81,21 @@ class FeatureIntegrationTest(unittest.TestCase):
         Image.new("RGB", size, (40, 120, 220)).save(stream, format=fmt)
         return stream.getvalue()
 
-    def test_ip_geolocation_uses_configured_timeout_and_cache(self):
-        ip_geo._cache.clear()
-        response = b'{"status":"success","country":"China","regionName":"Beijing","city":"Beijing"}'
+    def test_ip_geolocation_uses_https_timeout_and_cache(self):
+        ip_geo._reset_failure_backoff()
+        response = '{"code":0,"data":{"country":"中国-广西-柳州市"}}'.encode("utf-8")
         with patch.object(ip_geo.urllib.request, "urlopen") as urlopen:
             urlopen.return_value.__enter__.return_value.read.return_value = response
             with patch.object(ip_geo, "IP_API_TIMEOUT", 1.25):
-                self.assertEqual(ip_geo.get_ip_location("8.8.8.8"), ("Beijing", "Beijing"))
+                self.assertEqual(ip_geo.get_ip_location("8.8.8.8"), ("广西", "柳州市"))
                 self.assertEqual(ip_geo.get_ip_region("8.8.8.8"), "cn")
             urlopen.assert_called_once()
             request = urlopen.call_args.args[0]
-            self.assertIn("lang=zh-CN", request.full_url)
+            self.assertTrue(request.full_url.startswith("https://"))
+            self.assertIn("ip=8.8.8.8", request.full_url)
             self.assertEqual(urlopen.call_args.kwargs["timeout"], 1.25)
         self.assertEqual(ip_geo.get_ip_location("127.0.0.1"), ("", ""))
+        ip_geo._reset_failure_backoff()
 
     def test_upload_png_saves_original_thumbnail_and_database_row(self):
         before = database.get_db().execute(
@@ -114,8 +122,8 @@ class FeatureIntegrationTest(unittest.TestCase):
         self.assertEqual(row["title"], "测试图片")
         self.assertEqual(row["status"], "pending")
         self.assertEqual(row["province"], "测试省")
-        original_path = os.path.join(self.upload_dir, row["filename"])
-        thumb_path = os.path.join(self.upload_dir, row["thumb_filename"])
+        original_path = os.path.join(self.private_dir, row["filename"])
+        thumb_path = os.path.join(self.private_dir, row["thumb_filename"])
         self.assertTrue(os.path.isfile(original_path))
         self.assertTrue(os.path.isfile(thumb_path))
         for path in (original_path, thumb_path):

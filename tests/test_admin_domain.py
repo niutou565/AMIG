@@ -42,7 +42,7 @@ class AdminDomainConfigTest(unittest.TestCase):
         models.set_setting("admin_domain_initialized", "1")
         models.set_setting("enable_captcha", "0")
         models.set_setting("enable_dedup", "0")
-        auth._login_ip_attempts.clear()
+        auth.clear_login_rate_limits()
 
     # ---------- 工具 ----------
 

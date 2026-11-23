@@ -4,10 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}后台管理{% endblock %} - {{ site_name }}</title>
-    <meta name="theme-color" content="#0b0b0d">
-    <link rel="stylesheet" href="/static/css/dark.css?v=3">
-    <link rel="stylesheet" href="/static/css/admin.css?v=3">
-    <style>:root { --accent: {{ accent_color | safe_color }}; }</style>
+    <meta name="theme-color" content="#0a0a0a">
+    <link rel="icon" type="image/svg+xml" href="/static/img/favicon.svg">
+    <link rel="stylesheet" href="/static/css/dark.css?v=8">
+    <link rel="stylesheet" href="/static/css/admin.css?v=4">
+    <style nonce="{{ request.state.csp_nonce }}">:root { --accent: {{ accent_color | safe_color }}; }</style>
     {% block head %}{% endblock %}
 </head>
 <body>
@@ -51,11 +52,15 @@
                 </form>
             </header>
             <main class="admin-main">
+                {# 操作结果提示统一在布局层渲染，避免各页面提示位置和样式不一致 #}
+                {% if success %}<div class="alert alert-success" role="status">{{ success }}</div>{% endif %}
+                {% if error %}<div class="alert alert-error" role="alert">{{ error }}</div>{% endif %}
+                {% block flash_extra %}{% endblock %}
                 {% block content %}{% endblock %}
             </main>
         </div>
     </div>
-    <script src="/static/js/admin.js"></script>
+    <script src="/static/js/admin.js?v=4"></script>
     {% block scripts %}{% endblock %}
 </body>
 </html>

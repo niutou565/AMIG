@@ -4,6 +4,22 @@
 {% block content %}
 <h1>仪表盘</h1>
 
+<section class="panel quick-actions">
+    <div class="panel-head">
+        <h2 class="panel-title">快捷操作</h2>
+    </div>
+    <div class="quick-action-list">
+        <a href="/admin/review" class="btn btn-primary">待审核{% if data.pending %}（{{ data.pending }}）{% endif %}</a>
+        <a href="/admin/images" class="btn">图片管理</a>
+        <a href="/admin/users" class="btn">用户 / IP 管理</a>
+        <a href="/admin/links" class="btn">友情链接</a>
+        <a href="/admin/pages" class="btn">页面管理</a>
+        <a href="/admin/settings" class="btn">站点设置</a>
+        <a href="/admin/logs" class="btn">操作日志</a>
+        <a href="/" class="btn btn-ghost" target="_blank" rel="noopener">访问前台</a>
+    </div>
+</section>
+
 <div class="dash-grid">
     <section class="panel">
         <div class="panel-head">
@@ -109,11 +125,11 @@
 {% endblock %}
 
 {% block scripts %}
-<script type="application/json" id="trendDataJson">{{ data.stats_7d | tojson }}</script>
-<script>
+<script type="application/json" id="trendDataJson" nonce="{{ request.state.csp_nonce }}">{{ data.stats_7d | tojson }}</script>
+<script nonce="{{ request.state.csp_nonce }}">
 (function () {
     var trendData = JSON.parse(document.getElementById('trendDataJson').textContent);
-    var accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#6c5ce7';
+    var accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#c9a063';
 
     function renderTrendChart(type) {
         var svg = document.getElementById('trendChart');
@@ -155,7 +171,7 @@
             var y = h - padBottom - bh;
             if (val > 0) {
                 marks += '<rect x="' + x + '" y="' + y + '" width="' + bw + '" height="' + bh +
-                    '" rx="3" style="fill:' + accent + '" opacity="0.9">' +
+                    '" rx="3" fill="' + accent + '" opacity="0.9">' +
                     '<title>' + d.date + ': ' + val + '</title></rect>';
                 marks += '<text x="' + (x + bw / 2) + '" y="' + (y - 5) + '" fill="#a4a4af" ' +
                     'font-size="' + fontSize + '" text-anchor="middle">' + val + '</text>';

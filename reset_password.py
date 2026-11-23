@@ -1,31 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-管理员密码重置脚本（适用于宝塔面板 / 命令行）
+"""管理员密码重置脚本（适用于宝塔面板 / 命令行）
 
-功能：重置后台管理员（用户名 admin）的密码，并清除登录失败计数与锁定状态。
-
-用法：
-    python reset_password.py                # 交互式输入并确认新密码
-    python reset_password.py --yes          # 生成随机强密码并直接重置
-    python reset_password.py --password 自定义密码 [--yes]
-
-安全说明：
-    - 本脚本只允许在项目根目录或正确指向 data/app.db 的环境下运行
-    - 默认要求交互式确认，避免误操作
-    - 重置后请立即登录后台修改为强密码
+安全设计：
+- 不再接受 --password 命令行参数，避免密码出现在进程参数和 shell 历史中；
+- 默认使用 getpass 交互输入；自动化场景可通过 --stdin 从标准输入读取；
+- 重置成功后在同一事务内撤销全部旧会话、清除登录失败统计；
+- 不在任何日志或终端输出中打印新密码。
 """
 
 import os
 import sys
-import secrets
 import sqlite3
 import getpass
 
-DEFAULT_USERNAME = "admin"
-MIN_PASSWORD_LENGTH = 8
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# 数据库路径：优先使用环境变量 DATABASE_PATH，否则相对脚本目录 data/app.db
+DEFAULT_USERNAME = "admin"
+
+
 def resolve_db_path():
     env_path = os.getenv("DATABASE_PATH")
     if env_path:
@@ -34,7 +27,7 @@ def resolve_db_path():
     return os.path.join(base, "data", "app.db")
 
 
-def hash_password(password: str) -> str:
+def hash_password(password):
     try:
         import bcrypt
     except ImportError:
@@ -43,18 +36,42 @@ def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
-def confirm_reset(username: str, password: str, skip: bool) -> bool:
+def _read_password(use_stdin):
+    from app.password_policy import validate_password
+
+    if use_stdin:
+        password = sys.stdin.readline().rstrip("\r\n")
+        if not password:
+            print("[失败] 标准输入未提供密码")
+            sys.exit(1)
+    else:
+        try:
+            password = getpass.getpass("请输入新密码: ")
+            confirm = getpass.getpass("请再次输入确认: ")
+        except EOFError:
+            print("[失败] 非交互环境下请使用 --stdin 从标准输入提供密码")
+            sys.exit(1)
+        if password != confirm:
+            print("[失败] 两次输入不一致")
+            sys.exit(1)
+
+    error = validate_password(password)
+    if error:
+        print(f"[失败] {error}")
+        sys.exit(1)
+    return password
+
+
+def confirm_reset(username, skip):
     if skip:
         return True
     print("-" * 50)
     print("即将重置管理员密码：")
     print(f"  用户名 : {username}")
-    print(f"  新密码 : {password}")
     print("-" * 50)
     try:
         answer = input("确认执行？输入 y/yes 继续，其他任意键取消: ").strip().lower()
     except EOFError:
-        # 非交互环境且未传 --yes
         print("[失败] 非交互环境下需传入 --yes 参数才能执行（防止误操作）")
         return False
     return answer in ("y", "yes")
@@ -63,34 +80,14 @@ def confirm_reset(username: str, password: str, skip: bool) -> bool:
 def main():
     args = sys.argv[1:]
     skip = "--yes" in args
-    password = None
+    use_stdin = "--stdin" in args
 
-    # 解析 --password 参数
-    for i, a in enumerate(args):
-        if a == "--password" and i + 1 < len(args):
-            password = args[i + 1]
-        elif a.startswith("--password="):
-            password = a.split("=", 1)[1]
-
-    # 未显式指定密码时：交互式输入；非交互场景随机生成强密码，绝不使用固定弱密码
-    if not password:
-        if skip:
-            password = secrets.token_hex(12)
-        else:
-            try:
-                p1 = getpass.getpass(f"请输入新密码（至少 {MIN_PASSWORD_LENGTH} 位）: ")
-                p2 = getpass.getpass("请再次输入确认: ")
-            except EOFError:
-                print("[失败] 非交互环境下请通过 --password 或 --yes 指定密码")
-                sys.exit(1)
-            if p1 != p2:
-                print("[失败] 两次输入不一致")
-                sys.exit(1)
-            password = p1
-
-    if len(password) < MIN_PASSWORD_LENGTH:
-        print(f"[失败] 新密码长度不能少于 {MIN_PASSWORD_LENGTH} 位")
+    if any(arg == "--password" or arg.startswith("--password=") for arg in args):
+        print("[失败] 出于安全原因已移除 --password 参数。")
+        print("       交互式请直接运行；自动化请使用: python reset_password.py --stdin --yes")
         sys.exit(1)
+
+    password = _read_password(use_stdin)
 
     db_path = resolve_db_path()
     print("=" * 50)
@@ -102,36 +99,46 @@ def main():
         print("       请确认脚本位于项目根目录，或通过 DATABASE_PATH 环境变量指定路径")
         sys.exit(1)
 
-    if not confirm_reset(DEFAULT_USERNAME, password, skip):
+    if not confirm_reset(DEFAULT_USERNAME, skip):
         print("[已取消] 未执行任何修改")
         sys.exit(0)
 
+    password_hash = hash_password(password)
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=10)
         conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
-        cur.execute("SELECT id FROM admins WHERE username=?", (DEFAULT_USERNAME,))
-        row = cur.fetchone()
+        try:
+            with conn:
+                row = conn.execute(
+                    "SELECT id FROM admins WHERE username=?", (DEFAULT_USERNAME,)
+                ).fetchone()
 
-        if row:
-            cur.execute(
-                "UPDATE admins SET password_hash=?, login_attempts=0, locked_until=NULL WHERE username=?",
-                (hash_password(password), DEFAULT_USERNAME),
-            )
-            conn.commit()
-            print(f"[成功] 管理员 '{DEFAULT_USERNAME}' 密码已重置")
-        else:
-            # 管理员不存在时自动创建
-            import datetime
-            created_at = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
-            cur.execute(
-                "INSERT INTO admins (username, password_hash, login_attempts, locked_until, created_at) "
-                "VALUES (?, ?, 0, NULL, ?)",
-                (DEFAULT_USERNAME, hash_password(password), created_at),
-            )
-            conn.commit()
-            print(f"[成功] 管理员 '{DEFAULT_USERNAME}' 不存在，已创建并设置密码")
-        conn.close()
+                if row:
+                    admin_id = row["id"]
+                    conn.execute(
+                        "UPDATE admins SET password_hash=?, login_attempts=0, locked_until=NULL "
+                        "WHERE id=?",
+                        (password_hash, admin_id),
+                    )
+                    # 密码重置后所有旧会话必须失效
+                    conn.execute("DELETE FROM sessions WHERE admin_id=?", (admin_id,))
+                else:
+                    import datetime
+                    created_at = datetime.datetime.now(datetime.timezone.utc).isoformat(
+                        timespec="seconds"
+                    )
+                    conn.execute(
+                        "INSERT INTO admins (username, password_hash, login_attempts, locked_until, created_at) "
+                        "VALUES (?, ?, 0, NULL, ?)",
+                        (DEFAULT_USERNAME, password_hash, created_at),
+                    )
+                    admin_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                    conn.execute("DELETE FROM sessions WHERE admin_id=?", (admin_id,))
+
+                # 清空登录失败限流，避免重置后仍被旧 IP 计数拦截
+                conn.execute("DELETE FROM login_rate_limits")
+        finally:
+            conn.close()
     except sqlite3.OperationalError as e:
         print(f"[失败] 数据库操作出错: {e}")
         sys.exit(1)
@@ -139,9 +146,8 @@ def main():
         print(f"[失败] 发生未预期错误: {e}")
         sys.exit(1)
 
-    print(f"  用户名 : {DEFAULT_USERNAME}")
-    print(f"  新密码 : {password}")
-    print("  !! 请立即登录后台，并通过「修改密码」改为强密码 !!")
+    print(f"[成功] 管理员 '{DEFAULT_USERNAME}' 密码已重置，旧会话已全部撤销")
+    print("  !! 出于安全考虑，新密码不会再次显示；请立即登录后台确认 !!")
     print("=" * 50)
 
 

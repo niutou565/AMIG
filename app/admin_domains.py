@@ -5,9 +5,12 @@
 不会在每次启动时覆盖后台保存的配置。
 """
 import ipaddress
+import logging
 import re
 
 from app.config import ADMIN_DOMAIN
+
+_logger = logging.getLogger(__name__)
 
 # 主机名：允许字母、数字、连字符，单段最长 63，总长 253；不允许通配符
 _DOMAIN_RE = re.compile(
@@ -173,19 +176,42 @@ def ensure_admin_domain_initialized():
 
     通过 ``admin_domain_initialized`` 标记保证只执行一次：
     之后即使 .env 保留旧域名，也不会覆盖后台保存的新配置。
+
+    只有确实写入了有效域名才设置初始化标记；否则保留未初始化状态，
+    让用户稍后补充 .env 后仍能生效（避免首次启动没有域名时被永久锁死）。
     """
     from app.models import get_setting, set_setting
 
-    if get_setting("admin_domain_initialized") == "1":
-        return
-
-    current, _ = normalize_admin_domains(get_setting("admin_domain", "") or "")
+    raw = get_setting("admin_domain", "") or ""
+    current, invalid_current = normalize_admin_domains(raw)
+    if invalid_current:
+        _logger.warning(
+            "数据库中的管理域名有 %d 个非法项被忽略: %s",
+            len(invalid_current), ", ".join(invalid_current),
+        )
     if current:
         normalized = ",".join(current)
-        if (get_setting("admin_domain", "") or "") != normalized:
+        if raw != normalized:
             set_setting("admin_domain", normalized)
-    else:
-        env_domains, _ = normalize_admin_domains(ADMIN_DOMAIN)
+
+    initialized = get_setting("admin_domain_initialized") == "1"
+    if not current and not initialized:
+        env_domains, invalid_env = normalize_admin_domains(ADMIN_DOMAIN)
+        if invalid_env:
+            _logger.warning(
+                "ADMIN_DOMAIN 中有 %d 个非法项被忽略: %s",
+                len(invalid_env), ", ".join(invalid_env),
+            )
         if env_domains:
-            set_setting("admin_domain", ",".join(env_domains))
-    set_setting("admin_domain_initialized", "1")
+            current = env_domains
+            set_setting("admin_domain", ",".join(current))
+
+    if current and not initialized:
+        set_setting("admin_domain_initialized", "1")
+
+    if not current:
+        _logger.warning(
+            "未配置管理域名：/admin 目前仅允许本机回环地址访问。"
+            "请在 .env 设置 ADMIN_DOMAIN 后重启，或在本机访问后台"
+            "「站点设置 → 管理域名」完成配置。"
+        )

@@ -3,43 +3,70 @@
 {% block title %}{{ site_name }} - 匿名图片分享{% endblock %}
 
 {% block content %}
-<div class="hero">
-    <div class="hero-brand">
+<header class="masthead">
+    <div class="masthead-copy">
         {% if logo_large %}
-        <img src="/uploads/{{ logo_large }}" alt="logo" class="hero-logo">
+        <div class="masthead-brand">
+            <img src="/uploads/{{ logo_large }}" alt="{{ site_name }}" class="masthead-logo">
+        </div>
         {% endif %}
-        <h1 class="hero-title">{{ site_name }}</h1>
+        <p class="eyebrow">匿名分享 · 审核后公开</p>
+        <h1 class="masthead-title">{{ site_name }}</h1>
+        <p class="masthead-desc">{{ site_description }}</p>
+        <form action="/gallery" method="get" class="search-form" role="search">
+            <div class="search-field">
+                <span class="search-icon" aria-hidden="true">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                         stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.6-3.6"></path></svg>
+                </span>
+                <input type="text" name="q" placeholder="搜索标题、简介或署名…" class="search-input"
+                       aria-label="搜索图片">
+            </div>
+            <button type="submit" class="search-btn">搜索</button>
+        </form>
     </div>
-    <p class="hero-desc">{{ site_description }}</p>
-    <form action="/gallery" method="get" class="search-form" role="search">
-        <input type="text" name="q" placeholder="搜索标题、简介或署名…" class="search-input"
-               aria-label="搜索图片">
-        <button type="submit" class="search-btn">搜索</button>
-    </form>
-</div>
+    {% if latest_images %}
+    {% set cover = latest_images[0] %}
+    <a href="/image/{{ cover.id }}" class="masthead-feature">
+        <span class="feature-img">
+            <img src="/uploads/{{ cover.thumb_filename }}" alt="{{ cover.title or '未命名' }}"
+                 width="480" height="360" decoding="async" fetchpriority="high">
+        </span>
+        <span class="feature-meta">
+            <span class="feature-title">{{ cover.title or '未命名' }}</span>
+            <span class="feature-by">{{ cover|uploader_label }}</span>
+        </span>
+    </a>
+    {% endif %}
+</header>
 
-{% if random_images %}
+{% if latest_images|length > 1 %}
 <section class="section">
     <div class="section-head">
-        <h2 class="section-title">随机精选</h2>
+        <div class="section-head-text">
+            <h2 class="section-title">最新通过</h2>
+        </div>
+        <a href="/gallery" class="section-link">查看全部 <span aria-hidden="true">→</span></a>
     </div>
     <div class="image-grid">
-        {% for img in random_images %}
+        {% for img in latest_images[1:] %}
         {{ image_card(img, lazy=(loop.index > 4)) }}
         {% endfor %}
     </div>
 </section>
 {% endif %}
 
-{% if latest_images %}
+{% if random_images|length > 1 %}
 <section class="section">
     <div class="section-head">
-        <h2 class="section-title">最新通过</h2>
-        <a href="/gallery" class="section-link">查看全部 →</a>
+        <div class="section-head-text">
+            <h2 class="section-title">随机精选</h2>
+        </div>
+        <a href="/gallery" class="section-link">去图库逛逛 <span aria-hidden="true">→</span></a>
     </div>
-    <div class="image-grid">
-        {% for img in latest_images %}
-        {{ image_card(img, lazy=(loop.index > 4)) }}
+    <div class="image-grid image-grid--wide">
+        {% for img in random_images[1:7] %}
+        {{ image_card(img, lazy=(loop.index > 3)) }}
         {% endfor %}
     </div>
 </section>
@@ -48,14 +75,41 @@
 {% if top_images %}
 <section class="section">
     <div class="section-head">
-        <h2 class="section-title">本月热度榜</h2>
-        <a href="/top" class="section-link">完整榜单 →</a>
+        <div class="section-head-text">
+            <h2 class="section-title">本月热度榜</h2>
+        </div>
+        <a href="/top" class="section-link">完整榜单 <span aria-hidden="true">→</span></a>
     </div>
-    <div class="image-grid">
-        {% for img in top_images %}
-        {{ image_card(img, likes=img.window_likes, rank=loop.index) }}
+    <div class="top-list top-list--two-col">
+        {% for img in top_images[:8] %}
+        {% set card_text = img.title or '未命名' %}
+        <a href="/image/{{ img.id }}" class="top-item">
+            <span class="top-rank {% if loop.index == 1 %}gold{% elif loop.index == 2 %}silver{% elif loop.index == 3 %}bronze{% endif %}">{{ loop.index }}</span>
+            <span class="top-thumb">
+                <img src="/uploads/{{ img.thumb_filename }}" alt="{{ card_text }}"
+                     width="{{ img.width }}" height="{{ img.height }}"
+                     {% if loop.index > 2 %}loading="lazy"{% endif %} decoding="async">
+            </span>
+            <span class="top-info">
+                <span class="top-desc">{{ card_text }}</span>
+                <span class="top-meta">{{ img|uploader_label }}</span>
+            </span>
+            <span class="top-likes">&#10084; {{ img.window_likes }}</span>
+        </a>
         {% endfor %}
     </div>
 </section>
+{% endif %}
+
+{% if not latest_images and not random_images and not top_images %}
+<div class="empty-state">
+    <span class="empty-icon" aria-hidden="true">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><path d="m21 15-5-5L5 21"></path></svg>
+    </span>
+    <p class="empty-title">图库还没有图片</p>
+    <p>成为第一个分享的人，上传的图片将在审核通过后公开展示。</p>
+    <a href="/upload" class="btn btn-primary">上传第一张图片</a>
+</div>
 {% endif %}
 {% endblock %}

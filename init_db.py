@@ -29,7 +29,7 @@ def main():
     # 2. 创建管理员
     print("\n[2/5] 创建默认管理员...")
     admin_username = "admin"
-    admin_password = secrets.token_hex(8)
+    admin_password = secrets.token_hex(16)
     password_hash = bcrypt.hashpw(admin_password.encode(), bcrypt.gensalt()).decode()
 
     existing = db.execute("SELECT id FROM admins WHERE username=?", (admin_username,)).fetchone()
@@ -53,7 +53,7 @@ def main():
         "site_description": "一个简单的匿名图片分享社区",
         "footer_icp": "",
         "footer_copyright": "© 2024 匿名图片分享",
-        "theme_accent_color": "#6c5ce7",
+        "theme_accent_color": "#c9a063",
         "upload_limit_per_ip": "10",
         "upload_limit_per_ua": "10",
         "upload_limit_daily_total": "500",

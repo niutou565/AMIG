@@ -13,18 +13,25 @@ from app.config import DEFAULT_TOP_WINDOW_DAYS, DEFAULT_TOP_SHOW_COUNT, TOP_CACH
 _top_cache = {}
 
 
-def get_top_cached(limit=None):
-    """获取缓存的热度榜首页数据"""
-    window_days = get_setting_int("top_window_days", DEFAULT_TOP_WINDOW_DAYS)
-    show_count = get_setting_int("top_show_count", DEFAULT_TOP_SHOW_COUNT)
-    cache_key = f"top_{window_days}_{show_count}"
+def get_top_cached(limit=None, window_days=None, show_count=None):
+    """获取缓存的热度榜首页数据。
+
+    页面已经读取过 settings 时可直接传入窗口天数/展示数量，避免重复查询。
+    """
+    if window_days is None:
+        window_days = get_setting_int("top_window_days", DEFAULT_TOP_WINDOW_DAYS)
+    if show_count is None:
+        show_count = get_setting_int("top_show_count", DEFAULT_TOP_SHOW_COUNT)
+    # limit 参与缓存键，避免先用小 limit 缓存后大 limit 请求拿到被截断的数据
+    effective_limit = limit or show_count
+    cache_key = f"top_{window_days}_{show_count}_{effective_limit}"
 
     now = time.time()
     cached = _top_cache.get(cache_key)
     if cached and (now - cached[1]) < TOP_CACHE_TTL:
         return cached[0]
 
-    data = get_top_images(window_days, show_count, limit=limit or show_count)
+    data = get_top_images(window_days, show_count, limit=effective_limit)
     _top_cache[cache_key] = (data, now)
     return data
 
