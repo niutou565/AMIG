@@ -13,6 +13,7 @@ from html.parser import HTMLParser
 from unittest.mock import patch
 
 from PIL import Image
+from PIL.PngImagePlugin import PngInfo
 from fastapi.testclient import TestClient
 
 import app.auth as auth
@@ -137,7 +138,7 @@ class _FakeUpload:
 
 
 class TestLogoSave(unittest.TestCase):
-    """Logo 上传应分块读取，超限立即终止并清理临时文件"""
+    """Logo 上传应分块限长读取，并经解码校验与标准格式重编码后原子写入"""
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
@@ -148,14 +149,52 @@ class TestLogoSave(unittest.TestCase):
         admin_routes.UPLOADS_DIR = self._orig_uploads
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_small_logo_saved(self):
-        upload = _FakeUpload("logo.png", b"abc")
+    def test_small_logo_saved_and_reencoded(self):
+        buf = io.BytesIO()
+        info = PngInfo()
+        info.add_text("payload", "secret-hidden-data")
+        Image.new("RGB", (12, 8), (40, 120, 220)).save(buf, format="PNG", pnginfo=info)
+        data = buf.getvalue()
+        # 原始字节中带有隐藏元数据
+        self.assertIn(b"secret-hidden-data", data)
+        upload = _FakeUpload("logo.png", data)
         result = asyncio.run(admin_routes._save_logo(upload, "logo_large"))
         self.assertIsNotNone(result)
-        self.assertTrue(os.path.isfile(os.path.join(self.tmpdir, result)))
-        with open(os.path.join(self.tmpdir, result), "rb") as f:
-            self.assertEqual(f.read(), b"abc")
-        self.assertFalse(os.path.exists(os.path.join(self.tmpdir, result + ".tmp")))
+        path = os.path.join(self.tmpdir, result)
+        self.assertTrue(os.path.isfile(path))
+        with open(path, "rb") as f:
+            stored = f.read()
+        # 重编码后标准 PNG，隐藏元数据已被剥离
+        self.assertNotIn(b"secret-hidden-data", stored)
+        with Image.open(io.BytesIO(stored)) as img:
+            self.assertEqual(img.format, "PNG")
+            self.assertEqual(img.size, (12, 8))
+        self.assertFalse(os.path.exists(path + ".tmp"))
+
+    def test_fake_png_content_rejected(self):
+        """扩展名为 .png 但内容不是图片的伪造文件必须被拒绝"""
+        upload = _FakeUpload("logo.png", b"abc")
+        result = asyncio.run(admin_routes._save_logo(upload, "logo_large"))
+        self.assertIsNone(result)
+        self.assertEqual(_list_files(self.tmpdir), set())
+
+    def test_ico_logo_reencoded_as_png(self):
+        buf = io.BytesIO()
+        Image.new("RGB", (16, 16), (10, 10, 10)).save(buf, format="ICO")
+        upload = _FakeUpload("logo.ico", buf.getvalue())
+        result = asyncio.run(admin_routes._save_logo(upload, "logo_small"))
+        self.assertIsNotNone(result)
+        self.assertTrue(result.endswith(".png"))
+        with Image.open(os.path.join(self.tmpdir, result)) as img:
+            self.assertEqual(img.format, "PNG")
+
+    def test_oversized_dimensions_rejected(self):
+        data = _image_bytes(size=(100, 100))
+        with patch.object(image_utils, "MAX_LOGO_DIMENSION", 50):
+            upload = _FakeUpload("logo.png", data)
+            result = asyncio.run(admin_routes._save_logo(upload, "logo_large"))
+        self.assertIsNone(result)
+        self.assertEqual(_list_files(self.tmpdir), set())
 
     def test_invalid_extension_rejected_without_reading(self):
         upload = _FakeUpload("logo.svg", b"<svg/>")

@@ -1,6 +1,7 @@
 """后台管理路由（仅管理域名可访问）"""
 import re
 from fastapi import APIRouter, Request, Form, File, UploadFile, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from markupsafe import escape, Markup
@@ -70,42 +71,51 @@ ALLOWED_LOGO_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".ico"}
 
 
 async def _save_logo(upload_file, prefix):
-    """保存上传的 Logo 到 UPLOADS_DIR，返回文件名；非法扩展名、空文件或超大文件返回 None。
+    """保存上传的 Logo 到 UPLOADS_DIR，返回文件名；非法文件返回 None。
 
-    采用分块读取：累计大小一超过限制立即终止，避免先把整个文件读入内存。
+    与用户图片上传共用同一套安全处理链路：分块限长读取 → 扩展名白名单
+    （禁止 SVG）→ 实际解码校验（含解压炸弹、动图与像素尺寸限制）→
+    标准格式重新编码（剥离隐藏数据/恶意载荷）→ 原子写入。
     """
     if not (hasattr(upload_file, "filename") and upload_file.filename):
         return None
     import uuid
     ext = os.path.splitext(upload_file.filename)[1].lower()
     if ext not in ALLOWED_LOGO_EXTS:
+        logger.warning("拒绝不支持的 Logo 格式: %s", upload_file.filename)
         return None
-    logo_name = f"{prefix}_{uuid.uuid4().hex}{ext}"
+
+    buffer = bytearray()
+    total = 0
+    while True:
+        chunk = await upload_file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_UPLOAD_SIZE:
+            logger.warning("拒绝超大的 Logo 上传: %s", upload_file.filename)
+            return None
+        buffer.extend(chunk)
+    if total == 0:
+        return None
+
+    # 解码校验与重编码是 CPU 密集操作，放入线程池避免阻塞事件循环
+    data, final_ext, error = await run_in_threadpool(
+        image_utils.process_logo, bytes(buffer), ext
+    )
+    if error:
+        logger.warning("拒绝非法的 Logo 上传 %s: %s", upload_file.filename, error)
+        return None
+
+    logo_name = f"{prefix}_{uuid.uuid4().hex}{final_ext}"
     os.makedirs(UPLOADS_DIR, exist_ok=True)
     final_path = os.path.join(UPLOADS_DIR, logo_name)
-    tmp_path = final_path + ".tmp"
-    total = 0
     try:
-        with open(tmp_path, "wb") as f:
-            while True:
-                chunk = await upload_file.read(1024 * 1024)
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > MAX_UPLOAD_SIZE:
-                    raise ValueError("logo too large")
-                f.write(chunk)
-        if total == 0:
-            raise ValueError("logo is empty")
-        os.replace(tmp_path, final_path)
-        return logo_name
-    except Exception:
-        try:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-        except OSError:
-            pass
+        image_utils._atomic_write(final_path, data)
+    except OSError:
+        logger.exception("Logo 写入失败: %s", logo_name)
         return None
+    return logo_name
 
 
 def _set_admin_session_cookie(response, session_id, request):

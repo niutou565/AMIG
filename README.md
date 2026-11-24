@@ -1,6 +1,6 @@
 # AMIG · Anonymous Moderated Image Gallery（匿名图片分享站）
 
-一个轻量级的匿名图片分享社区：前台匿名上传/浏览/点赞，后台管理员审核与管理，全站暗色主题，采用双域名架构隔离前后台。当前发布版本为 1.1.0；1.0.5 已被 1.0.7 替代，属于不可用版本。
+一个轻量级的匿名图片分享社区：前台匿名上传/浏览/点赞，后台管理员审核与管理，全站暗色主题，采用双域名架构隔离前后台。当前发布版本为 1.1.1；1.0.5 已被 1.0.7 替代，属于不可用版本。
 
 ---
 
@@ -316,6 +316,7 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 | `DATABASE_PATH` | 数据库路径 | `data/app.db` |
 | `UPLOADS_DIR` | 公开上传目录（已审核图片与 Logo） | `uploads` |
 | `PRIVATE_UPLOADS_DIR` | 私有上传目录（待审核/已拒绝图片） | `private_uploads` |
+| `UPLOAD_MAX_CONCURRENT` | 上传接口（含 multipart 解析阶段）每进程最大并发请求数，超出返回 503 | `8` |
 | `IP_API_TIMEOUT` | IP 归属地 HTTPS 查询超时时间（秒） | `3` |
 | `IP_API_CACHE_TTL` | IP 归属地缓存时间（秒） | `300` |
 | `TRUSTED_PROXIES` | 可信反向代理地址（逗号分隔，**仅支持 IP/CIDR，不支持主机名**），仅这些来源的 `X-Real-IP`、`X-Forwarded-Proto` 会被信任；`0.0.0.0/0`、`::/0` 会被拒绝 | `127.0.0.1,::1` |
@@ -450,7 +451,7 @@ WORKERS=1
 >
 > `WORKERS` 修改后需要重启服务。多 worker 下 Session、登录限流和图片审核均通过 SQLite 共享，不会出现登录态不一致。
 >
-> 注意：上传时的图片解码/转码并发限制为**单进程内 4 个**，多 worker 部署时全局并发上限约为 `4 × WORKERS`。Worker 数较多时请评估服务器的 CPU 峰值；每日上传配额与 IP 间隔限制不受影响（基于数据库校验，多 worker 一致）。
+> 注意：上传接口设有两层并发保护：multipart 解析与图片处理阶段的并发闸门默认**单进程 8 个**（可用 `UPLOAD_MAX_CONCURRENT` 调整），图片解码/转码为单进程内 4 个。多 worker 部署时全局上限约为两者乘以 worker 数。Worker 数较多时请评估服务器的 CPU 峰值；每日上传配额与 IP 间隔限制通过数据库原子预约校验，多 worker 一致。上传请求体大小还受应用层限制（单文件 10MB，请求体含表单字段共 11MB），Nginx 层的 `client_max_body_size 12m` 与 `client_body_timeout` 共同拦截超大/慢速请求。
 
 可选项（有默认值，通常无需修改）：
 
@@ -609,6 +610,8 @@ server {
     ssl_certificate_key /etc/ssl/private/example.com.key;
 
     client_max_body_size 12m;
+    # 请求体读取超时：防止恶意客户端长时间挂起连接占用资源
+    client_body_timeout 30s;
 
     # 后台路由伪装 404
     location /admin { return 404; }
@@ -658,6 +661,8 @@ server {
     ssl_certificate_key /etc/ssl/private/admin.example.com.key;
 
     client_max_body_size 12m;
+    # 请求体读取超时：防止恶意客户端长时间挂起连接占用资源
+    client_body_timeout 30s;
 
     # 与主域名相同：拒绝敏感路径，且不配置 /uploads、private_uploads 的静态直发
     location ~ ^/(?:data|backups|private_uploads|logs|tools|tests)(?:/|$) { return 404; }

@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import re
 import sqlite3
 import time
@@ -7,6 +8,8 @@ import contextvars
 from datetime import datetime, timezone, timedelta
 from app.database import get_db
 from app.config import VIEW_DEDUP_WINDOW
+
+_logger = logging.getLogger(__name__)
 
 # 当前请求的管理员 IP（由 admin 路由设置，供日志记录使用）
 _current_admin_ip = contextvars.ContextVar("current_admin_ip", default="")
@@ -1071,6 +1074,140 @@ def get_last_upload_time(ip):
         (ip,)
     ).fetchone()
     return row["created_at"] if row else None
+
+
+# ========== 上传额度原子预约 ==========
+
+# 额度预约的保留时长（秒）：上传处理通常在数秒内结束，
+# 超过该时长的预约视为异常残留，在下次预约时惰性清理。
+UPLOAD_RESERVATION_TTL_SECONDS = 600
+
+
+class _UploadLimitDenied(Exception):
+    """限流拒绝信号，携带面向用户的提示文案。"""
+
+
+def reserve_upload_quota(ip, ua_hash_val):
+    """原子地检查并占用上传额度（检查与占用在同一写事务内完成）。
+
+    使用 BEGIN IMMEDIATE 串行化并发预约：同一时刻只有一个连接能执行
+    检查+插入，后续请求在锁上排队，提交后一定能读到先前请求占用的额度，
+    因此高并发下也不会超额通过限流检查。
+
+    预约成功后调用方必须在上传流程结束时（无论成败）调用
+    release_upload_reservation：成功时图片已入库计入额度，失败时归还额度。
+
+    返回 (allowed, error_message, reservation_id)。
+    """
+    from app.config import (
+        DEFAULT_UPLOAD_PER_IP, DEFAULT_UPLOAD_PER_UA,
+        DEFAULT_UPLOAD_DAILY_TOTAL, DEFAULT_UPLOAD_INTERVAL,
+    )
+
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+    except sqlite3.OperationalError:
+        _logger.warning("获取上传额度写锁超时，拒绝本次上传")
+        return (False, "系统繁忙，请稍后再试", None)
+
+    try:
+        # 惰性清理过期预约，避免异常残留长期占用额度
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(seconds=UPLOAD_RESERVATION_TTL_SECONDS)).isoformat()
+        conn.execute("DELETE FROM upload_reservations WHERE created_at < ?", (cutoff,))
+
+        per_ip = get_setting_int("upload_limit_per_ip", DEFAULT_UPLOAD_PER_IP)
+        per_ua = get_setting_int("upload_limit_per_ua", DEFAULT_UPLOAD_PER_UA)
+        daily_total = get_setting_int("upload_limit_daily_total", DEFAULT_UPLOAD_DAILY_TOTAL)
+        interval = get_setting_int("upload_interval_seconds", DEFAULT_UPLOAD_INTERVAL)
+
+        today = today_str()
+
+        # 全站上限：已入库图片 + 未完成入库的预约
+        total = (
+            conn.execute("SELECT COUNT(*) FROM images WHERE created_at >= ?", (today,)).fetchone()[0]
+            + conn.execute("SELECT COUNT(*) FROM upload_reservations WHERE created_at >= ?", (today,)).fetchone()[0]
+        )
+        if total >= daily_total:
+            raise _UploadLimitDenied("今日上传名额已满，请明日再来")
+
+        # IP 上限
+        ip_count = (
+            conn.execute(
+                "SELECT COUNT(*) FROM images WHERE ip=? AND created_at >= ?", (ip, today)
+            ).fetchone()[0]
+            + conn.execute(
+                "SELECT COUNT(*) FROM upload_reservations WHERE ip=? AND created_at >= ?", (ip, today)
+            ).fetchone()[0]
+        )
+        if ip_count >= per_ip:
+            raise _UploadLimitDenied(f"今日上传次数已达上限（{per_ip}次）")
+
+        # UA 上限
+        if per_ua > 0:
+            ua_count = (
+                conn.execute(
+                    "SELECT COUNT(*) FROM images WHERE ua_hash=? AND created_at >= ?", (ua_hash_val, today)
+                ).fetchone()[0]
+                + conn.execute(
+                    "SELECT COUNT(*) FROM upload_reservations WHERE ua_hash=? AND created_at >= ?", (ua_hash_val, today)
+                ).fetchone()[0]
+            )
+            if ua_count >= per_ua:
+                raise _UploadLimitDenied("今日上传次数已达上限")
+
+        # 上传间隔：已入库图片与进行中的预约都视为最近活动
+        mult = get_cooldown_multiplier(ip)
+        effective_interval = interval * mult
+        last_times = []
+        row = conn.execute(
+            "SELECT created_at FROM images WHERE ip=? ORDER BY created_at DESC LIMIT 1", (ip,)
+        ).fetchone()
+        if row:
+            last_times.append(row[0])
+        row = conn.execute(
+            "SELECT MAX(created_at) FROM upload_reservations WHERE ip=?", (ip,)
+        ).fetchone()
+        if row and row[0]:
+            last_times.append(row[0])
+        if last_times:
+            last_dt = max(parse_dt(t) for t in last_times)
+            elapsed = (datetime.now(timezone.utc) - last_dt).total_seconds()
+            if elapsed < effective_interval:
+                remaining = int(effective_interval - elapsed)
+                if mult > 1:
+                    raise _UploadLimitDenied(f"操作过于频繁，请 {remaining} 秒后再试（冷却中）")
+                raise _UploadLimitDenied(f"操作过于频繁，请 {remaining} 秒后再试")
+
+        cur = conn.execute(
+            "INSERT INTO upload_reservations (ip, ua_hash, created_at) VALUES (?, ?, ?)",
+            (ip, ua_hash_val, now_iso()),
+        )
+        conn.commit()
+        return (True, "", cur.lastrowid)
+    except _UploadLimitDenied as exc:
+        conn.rollback()
+        return (False, str(exc), None)
+    except sqlite3.Error:
+        _logger.exception("上传额度预约失败")
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        return (False, "系统繁忙，请稍后再试", None)
+
+
+def release_upload_reservation(reservation_id):
+    """释放上传额度预约（图片已入库或上传失败后调用）。"""
+    if not reservation_id:
+        return
+    try:
+        conn = get_db()
+        conn.execute("DELETE FROM upload_reservations WHERE id=?", (reservation_id,))
+        conn.commit()
+    except sqlite3.Error:
+        _logger.warning("释放上传额度预约失败 id=%s", reservation_id, exc_info=True)
 
 
 # ========== 后台搜索 ==========

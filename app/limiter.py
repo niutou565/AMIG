@@ -5,7 +5,7 @@ from app.models import (
     count_uploads_today_by_ip, count_uploads_today_by_ua,
     count_uploads_today_total, get_last_upload_time,
     count_likes_by_ip_last_minute, get_cooldown_multiplier,
-    get_setting_int
+    get_setting_int, reserve_upload_quota
 )
 from app.config import (
     DEFAULT_UPLOAD_PER_IP, DEFAULT_UPLOAD_PER_UA,
@@ -14,9 +14,21 @@ from app.config import (
 )
 
 
+def reserve_upload_slot(ip: str, ua_hash_val: str) -> tuple:
+    """原子地检查并占用上传额度，返回 (allowed, error_message, reservation_id)。
+
+    上传的限流必须使用本函数（检查与占用在同一写事务内完成），
+    不能仅依赖请求进入时的查询结果作为限流依据。
+    调用方在上传流程结束时（无论成败）必须调用
+    app.models.release_upload_reservation 释放预约。
+    """
+    return reserve_upload_quota(ip, ua_hash_val)
+
+
 def check_upload_limit(ip: str, ua_hash_val: str) -> tuple:
     """
-    检查上传限制，返回 (allowed, error_message)
+    检查上传限制（只读检查，不占用额度），返回 (allowed, error_message)。
+    仅保留用于兼容与测试，实际限流入口是 reserve_upload_slot。
     """
     per_ip = get_setting_int("upload_limit_per_ip", DEFAULT_UPLOAD_PER_IP)
     per_ua = get_setting_int("upload_limit_per_ua", DEFAULT_UPLOAD_PER_UA)

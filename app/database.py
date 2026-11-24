@@ -462,6 +462,15 @@ def _init_db_once():
             value   TEXT NOT NULL
         );
 
+        -- 上传额度预约表：在“限额检查 + 额度占用”原子化事务中使用，
+        -- 记录尚未完成入库的上传请求（入库或失败后即删除该行）
+        CREATE TABLE IF NOT EXISTS upload_reservations (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            ip          TEXT NOT NULL,
+            ua_hash     TEXT NOT NULL,
+            created_at  TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS pages (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             slug        TEXT NOT NULL UNIQUE,
@@ -609,6 +618,9 @@ def _init_db_once():
         CREATE INDEX IF NOT EXISTS idx_login_rate_limits_window ON login_rate_limits(window_start);
 
         CREATE INDEX IF NOT EXISTS idx_view_sessions_lookup ON view_sessions(image_id, ip, viewed_at);
+
+        CREATE INDEX IF NOT EXISTS idx_upload_reservations_ip ON upload_reservations(ip, created_at);
+        CREATE INDEX IF NOT EXISTS idx_upload_reservations_created ON upload_reservations(created_at);
     """)
 
     # ── 第四阶段：按版本执行结构迁移，并记录 schema 版本 ─────────────────

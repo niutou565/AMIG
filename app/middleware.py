@@ -1,12 +1,22 @@
 """Middleware: Host validation, admin domain control, CSRF protection"""
+import logging
 import secrets
+import threading
 from urllib.parse import urlparse
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import PlainTextResponse, Response
 
 from app.admin_domains import get_request_host, is_admin_access, is_loopback_host
-from app.config import COOKIE_SECURE, HSTS_MAX_AGE, HSTS_INCLUDE_SUBDOMAINS
+from app.config import (
+    COOKIE_SECURE,
+    HSTS_MAX_AGE,
+    HSTS_INCLUDE_SUBDOMAINS,
+    MAX_UPLOAD_BODY_SIZE,
+    UPLOAD_MAX_CONCURRENT,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class AdminDomainMiddleware(BaseHTTPMiddleware):
@@ -219,3 +229,89 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 hsts += "; includeSubDomains"
             response.headers.setdefault("Strict-Transport-Security", hsts)
         return response
+
+
+# ========== 上传请求体限制 ==========
+
+# 接受文件上传的端点：这些端点的 POST 请求会触发 multipart 解析，
+# 需要在解析阶段之前施加请求体大小与并发限制。
+UPLOAD_ENDPOINTS = frozenset({"/upload", "/admin/settings"})
+
+# 上传请求并发闸门（每进程）：覆盖“multipart 解析 + 图片处理”整个阶段。
+# 路由内的图片处理信号量只覆盖处理阶段，无法限制解析阶段的资源消耗。
+_upload_gate = threading.Semaphore(UPLOAD_MAX_CONCURRENT)
+
+
+class UploadBodyLimitMiddleware:
+    """在 multipart 解析阶段之前生效的上传请求体大小与并发限制。
+
+    - 带 Content-Length 的请求超限时直接返回 413，请求体不会进入
+      multipart 解析器，避免解析阶段消耗磁盘临时文件与内存；
+    - 无 Content-Length（chunked）的请求按流式计数，超过限制后立即
+      向应用发送断开信号终止解析，并标记 upload_body_too_large 供路由层拒绝；
+    - 并发闸门限制同时处于解析/处理阶段的上传请求数，超出返回 503。
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if (
+            scope["type"] != "http"
+            or scope["method"] != "POST"
+            or scope["path"] not in UPLOAD_ENDPOINTS
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        # 并发闸门：非阻塞获取，超出阈值立即拒绝，不排队消耗资源
+        if not _upload_gate.acquire(blocking=False):
+            logger.warning("上传并发超过上限 %d，拒绝请求: %s", UPLOAD_MAX_CONCURRENT, scope["path"])
+            response = PlainTextResponse(
+                "上传请求过多，请稍后再试",
+                status_code=503,
+                headers={"Retry-After": "5"},
+            )
+            await response(scope, receive, send)
+            return
+        try:
+            headers = dict(scope.get("headers") or [])
+            raw_length = headers.get(b"content-length")
+            if raw_length is not None:
+                try:
+                    content_length = int(raw_length)
+                except (TypeError, ValueError):
+                    content_length = 0
+                if content_length > MAX_UPLOAD_BODY_SIZE:
+                    logger.warning(
+                        "拒绝超过请求体大小限制的上传: %s (%d bytes)",
+                        scope["path"],
+                        content_length,
+                    )
+                    response = PlainTextResponse(
+                        "请求体超过大小限制",
+                        status_code=413,
+                        headers={"connection": "close"},
+                    )
+                    await response(scope, receive, send)
+                    return
+                await self.app(scope, receive, send)
+            else:
+                # chunked 请求：流式计数，超过限制后立即断开，终止解析
+                state = scope.setdefault("state", {})
+                received = 0
+                app_receive = receive
+
+                async def limited_receive():
+                    nonlocal received
+                    message = await app_receive()
+                    if message["type"] == "http.request":
+                        received += len(message.get("body", b"") or b"")
+                        if received > MAX_UPLOAD_BODY_SIZE:
+                            state["upload_body_too_large"] = True
+                            return {"type": "http.disconnect"}
+                    return message
+
+                await self.app(scope, limited_receive, send)
+        finally:
+            _upload_gate.release()

@@ -7,7 +7,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # 应用版本信息
 APP_NAME = "AMIG"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 
 # 从 .env 文件加载环境变量（必须在读取 os.getenv 之前执行，否则 ADMIN_DOMAIN 等不生效）
 _env_path = BASE_DIR / ".env"
@@ -104,7 +104,15 @@ HSTS_INCLUDE_SUBDOMAINS = os.getenv("HSTS_INCLUDE_SUBDOMAINS", "true").strip().l
 
 # 图片限制
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB
+# multipart 请求体的额外开销（表单字段、边界等），用于请求体总大小限制：
+# 该限制由中间件在 multipart 解析阶段之前生效，防止解析阶段消耗磁盘/内存
+MAX_UPLOAD_BODY_OVERHEAD = 1024 * 1024
+MAX_UPLOAD_BODY_SIZE = MAX_UPLOAD_SIZE + MAX_UPLOAD_BODY_OVERHEAD
+# 上传接口（含 multipart 解析阶段）每进程最大并发请求数，超出直接返回 503
+UPLOAD_MAX_CONCURRENT = int(os.getenv("UPLOAD_MAX_CONCURRENT", "8"))
 MAX_IMAGE_PIXELS = 25_000_000       # 2500万像素
+# Logo 图片的最大边长（像素）：Logo 属于站点资源，超出限制的重编码代价高且无必要
+MAX_LOGO_DIMENSION = 2048
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 MAX_DESC_LENGTH = 200
 MAX_TITLE_LENGTH = 100

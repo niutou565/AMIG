@@ -13,7 +13,7 @@ from app.config import (
 )
 from app.admin_domains import ensure_admin_domain_initialized
 from app.database import init_db, close_all_db, checkpoint_wal
-from app.middleware import AdminDomainMiddleware, CSRFMiddleware, SecurityHeadersMiddleware, load_sensitive_words
+from app.middleware import AdminDomainMiddleware, CSRFMiddleware, SecurityHeadersMiddleware, UploadBodyLimitMiddleware, load_sensitive_words
 from app.display import safe_color
 from app.routes import front, admin, api, media
 
@@ -37,6 +37,8 @@ app = FastAPI(
 app.add_middleware(AdminDomainMiddleware)
 app.add_middleware(CSRFMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
+# 最外层：上传请求体大小与并发限制，必须在 multipart 解析阶段之前生效
+app.add_middleware(UploadBodyLimitMiddleware)
 
 # Mount static files
 class CachedStaticFiles(StaticFiles):

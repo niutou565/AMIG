@@ -3,7 +3,7 @@ from fastapi import APIRouter, Request, Form, File, UploadFile, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, Response, FileResponse
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
-from app.config import BASE_DIR, MAX_DESC_LENGTH, MAX_TITLE_LENGTH, MAX_AUTHOR_LENGTH, GALLERY_PER_PAGE, MAX_UPLOAD_SIZE
+from app.config import BASE_DIR, MAX_DESC_LENGTH, MAX_TITLE_LENGTH, MAX_AUTHOR_LENGTH, GALLERY_PER_PAGE, MAX_UPLOAD_BODY_SIZE, MAX_UPLOAD_SIZE
 from app.models import (
     get_random_approved_images, get_latest_approved_images,
     search_approved_images, count_search_approved_images, normalize_search_query,
@@ -19,7 +19,8 @@ from app.models import (
 )
 from app.stats import get_top_cached
 from app.ip_geo import get_client_ip, get_ip_location, get_ip_region
-from app.limiter import check_upload_limit
+from app.limiter import reserve_upload_slot
+from app.models import release_upload_reservation
 from app.ban import check_ban_status
 from app import image_utils as image_utils_module
 from app.image_utils import validate_image, process_image
@@ -297,108 +298,116 @@ async def upload_action(
     if banned:
         return templates.TemplateResponse(request, "upload.html", {**ctx, "error": ban_msg})
 
-    # 限流检查
-    allowed, limit_msg = check_upload_limit(ip, ua_hash_val)
+    # 限流：原子地检查并占用上传额度（检查与占用在同一写事务内，防止并发超额）
+    allowed, limit_msg, reservation_id = reserve_upload_slot(ip, ua_hash_val)
     if not allowed:
         return templates.TemplateResponse(request, "upload.html", {**ctx, "error": limit_msg})
 
-    # 预检 Content-Length（粗略拦截超大请求，避免先完整读入内存）
-    content_length = request.headers.get("content-length", "")
-    if content_length.isdigit() and int(content_length) > MAX_UPLOAD_SIZE + 1024 * 1024:
-        return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "图片大小超过限制"})
-
-    # 分块读取文件，边读边限制大小（bytearray 避免大文件反复拼接产生额外内存拷贝）
-    file_data = bytearray()
-    while True:
-        chunk = await image.read(1024 * 1024)
-        if not chunk:
-            break
-        file_data.extend(chunk)
-        if len(file_data) > MAX_UPLOAD_SIZE:
+    try:
+        # chunked 上传超过请求体限制时，中间件已在解析阶段标记并终止解析
+        if getattr(request.state, "upload_body_too_large", False):
             return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "图片大小超过限制"})
 
-    if not file_data:
-        return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "请选择图片文件"})
-    file_data = bytes(file_data)
+        # 预检 Content-Length（粗略拦截超大请求，避免先完整读入内存）
+        content_length = request.headers.get("content-length", "")
+        if content_length.isdigit() and int(content_length) > MAX_UPLOAD_BODY_SIZE:
+            return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "图片大小超过限制"})
 
-    # 验证图片（包含解码校验，放到线程池，避免阻塞异步事件循环）
-    valid, err_msg = await run_in_threadpool(
-        _validate_image_limited,
-        file_data,
-        image.filename or "unknown.jpg",
-        getattr(image, "content_type", None),
-    )
-    if not valid:
-        return templates.TemplateResponse(request, "upload.html", {**ctx, "error": err_msg})
+        # 分块读取文件，边读边限制大小（bytearray 避免大文件反复拼接产生额外内存拷贝）
+        file_data = bytearray()
+        while True:
+            chunk = await image.read(1024 * 1024)
+            if not chunk:
+                break
+            file_data.extend(chunk)
+            if len(file_data) > MAX_UPLOAD_SIZE:
+                return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "图片大小超过限制"})
 
-    # 处理图片（在独立线程池中执行，避免阻塞事件循环；并发受信号量限制）
-    uploaded_at = now_iso()
-    watermark_text = ctx["watermark_text"]
-    result, err_msg = await run_in_threadpool(
-        _process_image_limited, file_data, watermark_text, author, uploaded_at
-    )
-    if not result:
-        return templates.TemplateResponse(request, "upload.html", {**ctx, "error": f"图片处理失败：{err_msg}"})
+        if not file_data:
+            return templates.TemplateResponse(request, "upload.html", {**ctx, "error": "请选择图片文件"})
+        file_data = bytes(file_data)
 
-    # 以下流程已把图片写入磁盘；若数据库操作失败或流程异常，必须清理文件，避免孤儿文件
-    saved = False
-    try:
-        # 图片去重
-        if ctx["enable_dedup"]:
-            is_dup = check_content_md5_duplicate(result["content_md5"], ip)
-            if is_dup:
-                from app.models import insert_image
-                province, city = await run_in_threadpool(get_ip_location, ip)
-                region = await run_in_threadpool(get_ip_region, ip)
-                insert_image(
-                    result["filename"], result["thumb_filename"],
-                    result["original_size"], result["compressed_size"],
-                    result["width"], result["height"],
-                    description, author, result["content_md5"],
-                    ip, ua_val, ua_hash_val, province, city, is_dup=1, title=title, region=region
-                )
-                saved = True
-                try:
-                    increment_daily_stat(today_str(), "upload_count")
-                except Exception:
-                    logger.warning("更新上传统计失败（图片已入库）", exc_info=True)
-                return templates.TemplateResponse(request, "upload.html", {
-                    **ctx, "success": "已提交，等待审核通过后公开展示（系统检测到疑似重复图片，将标记审核）"
-                })
-
-        # 存库
-        province, city = await run_in_threadpool(get_ip_location, ip)
-        region = await run_in_threadpool(get_ip_region, ip)
-        from app.models import insert_image
-        insert_image(
-            result["filename"], result["thumb_filename"],
-            result["original_size"], result["compressed_size"],
-            result["width"], result["height"],
-            description, author, result["content_md5"],
-            ip, ua_val, ua_hash_val, province, city, title=title, region=region
+        # 验证图片（包含解码校验，放到线程池，避免阻塞异步事件循环）
+        valid, err_msg = await run_in_threadpool(
+            _validate_image_limited,
+            file_data,
+            image.filename or "unknown.jpg",
+            getattr(image, "content_type", None),
         )
-        saved = True
+        if not valid:
+            return templates.TemplateResponse(request, "upload.html", {**ctx, "error": err_msg})
 
-        # 统计失败不应让用户以为上传失败（图片已成功入库）
+        # 处理图片（在独立线程池中执行，避免阻塞事件循环；并发受信号量限制）
+        uploaded_at = now_iso()
+        watermark_text = ctx["watermark_text"]
+        result, err_msg = await run_in_threadpool(
+            _process_image_limited, file_data, watermark_text, author, uploaded_at
+        )
+        if not result:
+            return templates.TemplateResponse(request, "upload.html", {**ctx, "error": f"图片处理失败：{err_msg}"})
+
+        # 以下流程已把图片写入磁盘；若数据库操作失败或流程异常，必须清理文件，避免孤儿文件
+        saved = False
         try:
-            increment_daily_stat(today_str(), "upload_count")
-        except Exception:
-            logger.warning("更新上传统计失败（图片已入库）", exc_info=True)
+            # 图片去重
+            if ctx["enable_dedup"]:
+                is_dup = check_content_md5_duplicate(result["content_md5"], ip)
+                if is_dup:
+                    from app.models import insert_image
+                    province, city = await run_in_threadpool(get_ip_location, ip)
+                    region = await run_in_threadpool(get_ip_region, ip)
+                    insert_image(
+                        result["filename"], result["thumb_filename"],
+                        result["original_size"], result["compressed_size"],
+                        result["width"], result["height"],
+                        description, author, result["content_md5"],
+                        ip, ua_val, ua_hash_val, province, city, is_dup=1, title=title, region=region
+                    )
+                    saved = True
+                    try:
+                        increment_daily_stat(today_str(), "upload_count")
+                    except Exception:
+                        logger.warning("更新上传统计失败（图片已入库）", exc_info=True)
+                    return templates.TemplateResponse(request, "upload.html", {
+                        **ctx, "success": "已提交，等待审核通过后公开展示（系统检测到疑似重复图片，将标记审核）"
+                    })
 
-        return templates.TemplateResponse(request, "upload.html", {
-            **ctx, "success": "已提交，等待审核通过后公开展示"
-        })
-    except Exception:
-        logger.exception("上传图片保存失败")
-        return templates.TemplateResponse(request, "upload.html", {
-            **ctx, "error": "保存失败，请稍后重试"
-        })
-    finally:
-        if not saved:
-            image_utils_module.delete_image_files(
+            # 存库
+            province, city = await run_in_threadpool(get_ip_location, ip)
+            region = await run_in_threadpool(get_ip_region, ip)
+            from app.models import insert_image
+            insert_image(
                 result["filename"], result["thumb_filename"],
-                uploads_dir=image_utils_module.PRIVATE_UPLOADS_DIR,
+                result["original_size"], result["compressed_size"],
+                result["width"], result["height"],
+                description, author, result["content_md5"],
+                ip, ua_val, ua_hash_val, province, city, title=title, region=region
             )
+            saved = True
+
+            # 统计失败不应让用户以为上传失败（图片已成功入库）
+            try:
+                increment_daily_stat(today_str(), "upload_count")
+            except Exception:
+                logger.warning("更新上传统计失败（图片已入库）", exc_info=True)
+
+            return templates.TemplateResponse(request, "upload.html", {
+                **ctx, "success": "已提交，等待审核通过后公开展示"
+            })
+        except Exception:
+            logger.exception("上传图片保存失败")
+            return templates.TemplateResponse(request, "upload.html", {
+                **ctx, "error": "保存失败，请稍后重试"
+            })
+        finally:
+            if not saved:
+                image_utils_module.delete_image_files(
+                    result["filename"], result["thumb_filename"],
+                    uploads_dir=image_utils_module.PRIVATE_UPLOADS_DIR,
+                )
+    finally:
+        # 无论上传成败都要释放额度预约：成功时图片已入库计入额度，失败时归还额度
+        release_upload_reservation(reservation_id)
 
 
 # ========== 自定义页面 ==========

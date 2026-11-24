@@ -12,7 +12,7 @@ from PIL import Image, ImageDraw, ImageFont
 from app.config import (
     UPLOADS_DIR, PRIVATE_UPLOADS_DIR, MAX_UPLOAD_SIZE, MAX_IMAGE_PIXELS,
     ALLOWED_EXTENSIONS, MAX_IMAGE_DIMENSION, THUMB_DIMENSION,
-    WEBP_QUALITY, WEBP_EFFORT, WATERMARK_FONT_PATH
+    WEBP_QUALITY, WEBP_EFFORT, WATERMARK_FONT_PATH, MAX_LOGO_DIMENSION
 )
 
 # 设置像素上限防解压炸弹
@@ -456,6 +456,87 @@ def _open_image_checked(file_data: bytes):
         img.close()
         raise Image.DecompressionBombError(PIXEL_LIMIT_ERROR)
     return img
+
+
+# Logo 上传支持的扩展名与对应内部格式（SVG 由调用方在扩展名白名单中禁止）
+_LOGO_FORMAT_BY_EXT = {".jpg": "jpg", ".jpeg": "jpg", ".png": "png", ".webp": "webp", ".ico": "ico"}
+
+
+def _detect_logo_format(data: bytes):
+    """根据文件头返回 Logo 实际格式（jpg/png/webp/ico），无法识别返回 None。"""
+    fmt = detect_image_format(data)
+    if fmt:
+        return fmt
+    if data[:4] == b'\x00\x00\x01\x00':
+        return "ico"
+    return None
+
+
+def process_logo(file_data: bytes, ext: str) -> tuple:
+    """校验并重新编码 Logo 图片，返回 (reencoded_bytes, ext, error)。
+
+    与用户图片上传共用同一套安全处理链路：
+    - 文件头魔数与扩展名一致性校验（ico 魔数单独识别）；
+    - 实际解码校验（含解压炸弹与动图拒绝）；
+    - Logo 像素尺寸限制（MAX_LOGO_DIMENSION）；
+    - 标准格式重新编码，剥离隐藏数据/恶意载荷后由调用方原子写入。
+    ICO 统一重编码为 PNG（扩展名随返回值变化）。
+    成功时 error 为空字符串；失败时 data 为 None。
+    """
+    from io import BytesIO
+
+    if ext not in _LOGO_FORMAT_BY_EXT:
+        return (None, "", "不支持的Logo格式")
+    if len(file_data) > MAX_UPLOAD_SIZE:
+        return (None, "", f"Logo 文件过大（最大 {MAX_UPLOAD_SIZE // 1024 // 1024}MB）")
+
+    expected = _LOGO_FORMAT_BY_EXT[ext]
+    actual = _detect_logo_format(file_data)
+    if actual != expected:
+        return (None, "", "Logo 文件格式与内容不匹配")
+
+    img = None
+    try:
+        try:
+            img = _open_image_checked(file_data)
+        except (Image.DecompressionBombWarning, Image.DecompressionBombError):
+            return (None, "", PIXEL_LIMIT_ERROR)
+        except Exception:
+            return (None, "", "Logo 文件损坏或无法解码")
+
+        if (getattr(img, "is_animated", False)
+                or int(getattr(img, "n_frames", 1) or 1) > 1):
+            return (None, "", ANIMATED_IMAGE_ERROR)
+        if max(img.size) > MAX_LOGO_DIMENSION:
+            return (None, "", f"Logo 尺寸超过限制（最大边长 {MAX_LOGO_DIMENSION}px）")
+
+        # 目标格式：ico 重编码为 png，其余保持原格式
+        out_ext = "png" if actual == "ico" else actual
+        had_alpha = (img.mode in ("RGBA", "LA")
+                     or (img.mode == "P" and "transparency" in img.info))
+        if out_ext == "jpg":
+            out = img.convert("RGB")
+        elif had_alpha:
+            out = img.convert("RGBA")
+        elif img.mode == "P":
+            out = img.convert("RGB")
+        else:
+            out = img
+
+        output = BytesIO()
+        if out_ext == "jpg":
+            out.save(output, format="JPEG", quality=90)
+        elif out_ext == "png":
+            out.save(output, format="PNG")
+        else:
+            out.save(output, format="WEBP", quality=WEBP_QUALITY, method=WEBP_EFFORT)
+        return (output.getvalue(), f".{out_ext}", "")
+    except Exception:
+        LOGGER.warning("Logo 重编码失败（扩展名 %s）", ext, exc_info=True)
+        return (None, "", "Logo 文件损坏或无法解码")
+    finally:
+        if img is not None:
+            img.close()
 
 
 def process_image(file_data: bytes, watermark_text="", author="", uploaded_at="",
