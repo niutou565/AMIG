@@ -64,7 +64,7 @@ if not exist "%SCRIPT_DIR%requirements.txt" (
     exit /b 1
 )
 
-python -c "import fastapi, uvicorn, multipart, PIL, bcrypt, aiofiles, jinja2, httpx" >nul 2>&1
+python -c "import fastapi, uvicorn, multipart, PIL, bcrypt, aiofiles, jinja2, httpx, pymysql" >nul 2>&1
 if %errorlevel% neq 0 (
     echo [WARN] Dependencies not installed or incomplete, installing now...
     echo        (Using prebuilt wheels, this may take a moment...)
@@ -106,20 +106,18 @@ if not exist "%SCRIPT_DIR%.env" (
     echo [OK] .env config file exists
 )
 
-:: ========== Step 6: Initialize Database ==========
+:: ========== Step 6: Initialize Database (MySQL) ==========
 echo.
 echo [*] Initializing database...
 if not exist "%SCRIPT_DIR%data" mkdir "%SCRIPT_DIR%data"
-if exist "%SCRIPT_DIR%data\app.db" (
-    echo [OK] Database already exists, skipping init
-) else (
-    python "%SCRIPT_DIR%init_db.py"
-    if %errorlevel% neq 0 (
-        echo [ERROR] Database initialization failed
-        pause
-        exit /b 1
-    )
-    echo [OK] Database initialized
+:: 建表与默认数据初始化是幂等的；MySQL 连接失败时脚本会给出配置提示
+python "%SCRIPT_DIR%init_db.py"
+if %errorlevel% neq 0 (
+    echo [ERROR] Database initialization failed.
+    echo         Please check MYSQL_HOST / MYSQL_PORT / MYSQL_DATABASE / MYSQL_USER / MYSQL_PASSWORD
+    echo         in .env, and make sure MySQL 8.0+ is running.
+    pause
+    exit /b 1
 )
 
 :: ========== Step 7: Check Port ==========

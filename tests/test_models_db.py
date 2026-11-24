@@ -1,36 +1,31 @@
 """数据库索引与查询（含 N+1 修复）的集成测试"""
-import os
-import shutil
-import tempfile
 import unittest
 
 import app.database as db
 import app.models as models
 from app.limiter import check_upload_limit
+from tests.mysql_test_utils import create_test_database, drop_test_database
 
 
 class DbTestCase(unittest.TestCase):
-    """使用独立临时数据库的测试基类"""
+    """使用独立 MySQL 测试库的测试基类"""
 
     @classmethod
     def setUpClass(cls):
-        cls._tmpdir = tempfile.mkdtemp()
-        cls._orig = db.DATABASE_PATH
-        db.DATABASE_PATH = os.path.join(cls._tmpdir, "test.db")
-        db.init_db()
+        cls._db_name = create_test_database()
 
     @classmethod
     def tearDownClass(cls):
-        db.close_db()
-        db.DATABASE_PATH = cls._orig
-        shutil.rmtree(cls._tmpdir, ignore_errors=True)
+        drop_test_database(cls._db_name)
 
 
 class TestPerformanceIndexes(DbTestCase):
     def test_performance_indexes_exist(self):
         conn = db.get_db()
         rows = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='index'"
+            "SELECT DISTINCT index_name AS name FROM information_schema.statistics "
+            "WHERE table_schema=?",
+            (db.MYSQL_DATABASE,),
         ).fetchall()
         names = {r["name"] for r in rows}
         for idx in (

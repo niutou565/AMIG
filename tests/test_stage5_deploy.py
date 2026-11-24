@@ -1,8 +1,5 @@
 # -*- coding: utf-8 -*-
 """第五阶段：部署配置、可信代理与管理域名初始化测试。"""
-import os
-import shutil
-import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -12,6 +9,7 @@ import app.ip_geo as ip_geo
 import app.models as models
 from app.config import _parse_trusted_proxies
 from app.middleware import validate_same_origin
+from tests.mysql_test_utils import create_test_database, drop_test_database
 
 
 class FakeClient:
@@ -27,21 +25,15 @@ class FakeRequest:
 
 class TempDbCase(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.mkdtemp(prefix="amig_stage5_")
-        self._orig_path = db.DATABASE_PATH
-        db.close_all_db()
-        db.DATABASE_PATH = os.path.join(self.tmpdir, "app.db")
-        db.init_db()
+        self._db_name = create_test_database()
 
     def tearDown(self):
-        db.close_all_db()
-        db.DATABASE_PATH = self._orig_path
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        drop_test_database(self._db_name)
 
     def clear_admin_domain(self):
         conn = db.get_db()
         conn.execute(
-            "DELETE FROM settings WHERE key IN ('admin_domain', 'admin_domain_initialized')"
+            "DELETE FROM settings WHERE `key` IN ('admin_domain', 'admin_domain_initialized')"
         )
         conn.commit()
 

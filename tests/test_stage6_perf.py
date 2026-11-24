@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """第六阶段：前台查询精简、静态缓存与浏览去重写入优化测试。"""
 import os
-import shutil
-import tempfile
+import re
 import unittest
 from unittest.mock import patch
 
@@ -14,23 +13,15 @@ import app.database as db
 import app.models as models
 import app.stats as stats
 from app.main import CachedStaticFiles
+from tests.mysql_test_utils import create_test_database, drop_test_database
 
 
 class TempDbCase(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.mkdtemp(prefix="amig_stage6_")
-        self._orig_path = db.DATABASE_PATH
-        self._orig_backup = db.BACKUP_DIR
-        db.close_all_db()
-        db.DATABASE_PATH = os.path.join(self.tmpdir, "app.db")
-        db.BACKUP_DIR = os.path.join(self.tmpdir, "backups")
-        db.init_db()
+        self._db_name = create_test_database()
 
     def tearDown(self):
-        db.close_all_db()
-        db.DATABASE_PATH = self._orig_path
-        db.BACKUP_DIR = self._orig_backup
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        drop_test_database(self._db_name)
 
     def add_image(self):
         conn = db.get_db()
@@ -50,14 +41,11 @@ class TempDbCase(unittest.TestCase):
 class GetDbProbeTest(TempDbCase):
     def test_repeated_get_db_does_not_execute_probe_sql(self):
         conn = db.get_db()
-        statements = []
-        conn.set_trace_callback(statements.append)
-        try:
+        # MySQL 连接没有 set_trace_callback：直接拦截 execute，任何探测 SQL 都会被记录
+        with patch.object(db.ConnectionWrapper, "execute") as mocked:
             for _ in range(5):
                 self.assertIs(db.get_db(), conn)
-        finally:
-            conn.set_trace_callback(None)
-        self.assertEqual(statements, [], "get_db 仍在校验连接时执行 SQL")
+        mocked.assert_not_called()
 
     def test_connection_recreated_after_close_all(self):
         old = db.get_db()
@@ -72,17 +60,26 @@ class ViewDedupWriteTest(TempDbCase):
         image_id = self.add_image()
         self.assertTrue(models.should_count_view(image_id, "8.8.8.8"))
 
-        conn = db.get_db()
         statements = []
-        conn.set_trace_callback(statements.append)
-        try:
-            self.assertFalse(models.should_count_view(image_id, "8.8.8.8"))
-        finally:
-            conn.set_trace_callback(None)
+        original_execute = db.ConnectionWrapper.execute
 
-        sql = " ".join(statements).upper()
-        self.assertNotIn("INSERT", sql, "重复浏览仍执行了写操作")
-        self.assertNotIn("BEGIN", sql, "重复浏览仍开启了写事务")
+        def recording_execute(conn_self, sql, params=()):
+            statements.append(sql)
+            return original_execute(conn_self, sql, params)
+
+        # MySQL 连接没有 set_trace_callback：包装 execute 记录 SQL，并拦截 begin/commit
+        with patch.object(db.ConnectionWrapper, "execute", recording_execute), \
+                patch.object(db.ConnectionWrapper, "begin") as begin_mock, \
+                patch.object(db.ConnectionWrapper, "commit") as commit_mock:
+            self.assertFalse(models.should_count_view(image_id, "8.8.8.8"))
+        begin_mock.assert_not_called()
+        commit_mock.assert_not_called()
+
+        writes = [
+            sql for sql in statements
+            if re.search(r"\b(INSERT|UPDATE|DELETE|REPLACE)\b", sql, re.IGNORECASE)
+        ]
+        self.assertEqual(writes, [], f"重复浏览仍执行了写操作: {writes}")
 
     def test_concurrent_first_views_still_only_count_once(self):
         image_id = self.add_image()

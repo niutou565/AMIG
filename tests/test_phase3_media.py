@@ -20,9 +20,15 @@ import app.models as models
 import app.routes.admin as admin_routes
 import app.upload_consistency as consistency
 from app.main import app
+from tests.mysql_test_utils import create_test_database, drop_test_database
 from tools import migrate_private_uploads as migration
 
 CSRF_RE = re.compile(r'name="csrf_token" value="([^"]+)"')
+
+
+def _reset_db_pool():
+    """关闭全部连接并重置连接池（用例间彻底隔离）。"""
+    database.close_all_db()
 
 
 def _png_bytes(size=(20, 20), mode="RGB", color=(40, 120, 220)):
@@ -58,18 +64,15 @@ class Phase3MediaTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmpdir = tempfile.mkdtemp(prefix="amig-phase3-")
-        cls._orig_db = database.DATABASE_PATH
+        cls.db_name = create_test_database()
         cls._orig_uploads = image_utils.UPLOADS_DIR
         cls._orig_private = image_utils.PRIVATE_UPLOADS_DIR
         cls._orig_admin_uploads = admin_routes.UPLOADS_DIR
-        database.close_db()
-        database.DATABASE_PATH = os.path.join(cls.tmpdir, "app.db")
         image_utils.UPLOADS_DIR = os.path.join(cls.tmpdir, "uploads")
         image_utils.PRIVATE_UPLOADS_DIR = os.path.join(cls.tmpdir, "private_uploads")
         admin_routes.UPLOADS_DIR = image_utils.UPLOADS_DIR
         os.makedirs(image_utils.UPLOADS_DIR, exist_ok=True)
         os.makedirs(image_utils.PRIVATE_UPLOADS_DIR, exist_ok=True)
-        database.init_db()
         models.set_setting("admin_domain", "admin.test")
         models.set_setting("admin_domain_initialized", "1")
         models.set_setting("enable_captcha", "0")
@@ -84,12 +87,14 @@ class Phase3MediaTest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        database.close_db()
-        database.DATABASE_PATH = cls._orig_db
+        drop_test_database(cls.db_name)
         image_utils.UPLOADS_DIR = cls._orig_uploads
         image_utils.PRIVATE_UPLOADS_DIR = cls._orig_private
         admin_routes.UPLOADS_DIR = cls._orig_admin_uploads
         shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def tearDown(self):
+        _reset_db_pool()
 
     def _client(self, host="site.test"):
         return TestClient(app, base_url=f"https://{host}", raise_server_exceptions=False)
@@ -409,20 +414,17 @@ class Phase3UploadValidationTest(unittest.TestCase):
 class UploadConsistencyTest(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp(prefix="amig-consistency-")
-        self._orig_db = database.DATABASE_PATH
+        self.db_name = create_test_database()
         self._orig_uploads = image_utils.UPLOADS_DIR
         self._orig_private = image_utils.PRIVATE_UPLOADS_DIR
-        database.close_db()
-        database.DATABASE_PATH = os.path.join(self.tmpdir, "app.db")
         image_utils.UPLOADS_DIR = os.path.join(self.tmpdir, "uploads")
         image_utils.PRIVATE_UPLOADS_DIR = os.path.join(self.tmpdir, "private_uploads")
         os.makedirs(image_utils.UPLOADS_DIR, exist_ok=True)
         os.makedirs(image_utils.PRIVATE_UPLOADS_DIR, exist_ok=True)
-        database.init_db()
 
     def tearDown(self):
-        database.close_db()
-        database.DATABASE_PATH = self._orig_db
+        drop_test_database(self.db_name)
+        _reset_db_pool()
         image_utils.UPLOADS_DIR = self._orig_uploads
         image_utils.PRIVATE_UPLOADS_DIR = self._orig_private
         shutil.rmtree(self.tmpdir, ignore_errors=True)

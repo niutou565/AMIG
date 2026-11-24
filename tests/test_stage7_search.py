@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """第七阶段：搜索准确性、中文检索、分页排序与权限一致性测试。"""
 import os
-import shutil
-import tempfile
 import unittest
 
 from fastapi.testclient import TestClient
@@ -11,25 +9,23 @@ import app.auth as auth
 import app.database as db
 import app.models as models
 from app.main import app
+from tests.mysql_test_utils import create_test_database, drop_test_database
+
+
+def _reset_db_pool():
+    """关闭全部连接并重置连接池（用例间彻底隔离）。"""
+    db.close_all_db()
 
 
 class SearchDbCase(unittest.TestCase):
-    """每个用例使用独立临时数据库，避免相互干扰。"""
+    """每个用例使用独立 MySQL 测试库，避免相互干扰。"""
 
     def setUp(self):
-        self.tmpdir = tempfile.mkdtemp(prefix="amig_stage7_")
-        self._orig_path = db.DATABASE_PATH
-        self._orig_backup = db.BACKUP_DIR
-        db.close_all_db()
-        db.DATABASE_PATH = os.path.join(self.tmpdir, "app.db")
-        db.BACKUP_DIR = os.path.join(self.tmpdir, "backups")
-        db.init_db()
+        self.db_name = create_test_database()
 
     def tearDown(self):
-        db.close_all_db()
-        db.DATABASE_PATH = self._orig_path
-        db.BACKUP_DIR = self._orig_backup
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        drop_test_database(self.db_name)
+        _reset_db_pool()
 
     def add_image(self, title="", description="", author="", status="approved",
                   reviewed_at="2026-01-01T00:00:00+00:00", ip="1.1.1.1",
@@ -268,11 +264,7 @@ class TestSearchRoutes(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.tmpdir = tempfile.mkdtemp(prefix="amig_stage7_route_")
-        cls._orig_path = db.DATABASE_PATH
-        db.close_all_db()
-        db.DATABASE_PATH = os.path.join(cls.tmpdir, "app.db")
-        db.init_db()
+        cls.db_name = create_test_database()
         models.set_setting("admin_domain", "admin.test")
         models.set_setting("enable_captcha", "0")
         models.set_setting("enable_dedup", "0")
@@ -298,9 +290,11 @@ class TestSearchRoutes(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        db.close_all_db()
-        db.DATABASE_PATH = cls._orig_path
-        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+        drop_test_database(cls.db_name)
+        _reset_db_pool()
+
+    def tearDown(self):
+        _reset_db_pool()
 
     def client(self):
         return TestClient(app, base_url="https://admin.test",

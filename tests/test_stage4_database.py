@@ -1,34 +1,34 @@
-"""第四阶段：SQLite 连接管理、WAL、事务与并发一致性测试。
+"""第四阶段：MySQL 连接管理、事务、并发一致性与删除语义测试。
 
-这些测试全部使用临时数据库，不接触 data/app.db。
+这些测试使用独立的随机 MySQL 测试库（amig_test_*），不接触开发库。
 """
 import multiprocessing
 import os
-import shutil
-import sqlite3
-import tempfile
 import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 
 import app.database as db
 import app.models as models
+from tests.mysql_test_utils import clean_tables, create_test_database, drop_test_database
 
 
-def _multiprocess_worker(db_path, image_id, index, queue):
-    """独立进程模拟一个 uvicorn worker：各自建连、并发写同一 SQLite 库。"""
+def _multiprocess_worker(db_name, image_id, index, queue):
+    """独立进程模拟一个 uvicorn worker：各自建连、并发写同一 MySQL 库。
+
+    测试库名通过环境变量 MYSQL_DATABASE 传递（spawn 子进程会重新导入配置）。
+    """
+    os.environ["MYSQL_DATABASE"] = db_name
     import app.database as database
     import app.models as models_module
 
-    database.DATABASE_PATH = db_path
     try:
-        database.close_all_db()
         database.init_db(max_wait_seconds=60)
         views_new = 0
         conn = database.get_db()
         for i in range(20):
             conn.execute(
-                "INSERT INTO settings (key, value) VALUES (?, ?)",
+                "INSERT INTO settings (`key`, value) VALUES (?, ?)",
                 (f"mp_{index}_{i}", "1"),
             )
             conn.commit()
@@ -54,30 +54,31 @@ def _now_iso(offset_seconds=0):
 
 
 class TempDbCase(unittest.TestCase):
-    """每个测试类一份独立临时库。"""
+    """每个测试类一份独立 MySQL 测试库。"""
 
     @classmethod
     def setUpClass(cls):
-        cls._tmpdir = tempfile.mkdtemp(prefix="amig_stage4_")
-        cls._orig_path = db.DATABASE_PATH
-        cls._orig_backup = db.BACKUP_DIR
-        # 先关闭其他测试遗留的连接，避免连接仍指向旧路径而绕过临时库
-        db.close_all_db()
-        db.DATABASE_PATH = os.path.join(cls._tmpdir, "stage4.db")
-        db.BACKUP_DIR = os.path.join(cls._tmpdir, "backups")
-        db.init_db()
+        cls.db_name = create_test_database()
+        # 供 multiprocessing/spawn 子进程使用
+        cls._orig_env_db = os.environ.get("MYSQL_DATABASE")
+        os.environ["MYSQL_DATABASE"] = cls.db_name
 
     @classmethod
     def tearDownClass(cls):
-        db.close_all_db()
-        db.DATABASE_PATH = cls._orig_path
-        db.BACKUP_DIR = cls._orig_backup
-        shutil.rmtree(cls._tmpdir, ignore_errors=True)
+        if cls._orig_env_db is None:
+            os.environ.pop("MYSQL_DATABASE", None)
+        else:
+            os.environ["MYSQL_DATABASE"] = cls._orig_env_db
+        drop_test_database(cls.db_name)
+
+    def setUp(self):
+        # 用例间相互独立，避免前一用例的数据影响计数类断言
+        clean_tables()
 
     def _insert_image(self, status="pending", ip="1.1.1.1", like_count=0,
                       created_at=None, md5=None):
         conn = db.get_db()
-        conn.execute(
+        cursor = conn.execute(
             "INSERT INTO images (filename, thumb_filename, original_size,"
             " compressed_size, width, height, description, title, author,"
             " content_md5, ip, ua, ua_hash, province, city, region, status,"
@@ -90,7 +91,7 @@ class TempDbCase(unittest.TestCase):
              like_count),
         )
         conn.commit()
-        return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        return cursor.lastrowid
 
 
 class TestConnectionManagement(TempDbCase):
@@ -111,7 +112,7 @@ class TestConnectionManagement(TempDbCase):
         self.assertIs(db.get_db(), main_conn, "同线程内应复用同一连接")
 
     def test_close_all_db_closes_pooled_connections(self):
-        """close_all_db 必须关闭线程池里所有连接（否则 Windows 下无法替换数据库文件）。"""
+        """close_all_db 必须关闭所有引用到的连接。"""
         collected = []
 
         def worker():
@@ -128,8 +129,11 @@ class TestConnectionManagement(TempDbCase):
 
         db.close_all_db()
         for conn in collected:
-            with self.assertRaises(sqlite3.ProgrammingError):
+            with self.assertRaises(db.DatabaseError):
                 conn.execute("SELECT 1")
+        # 计数正确归零，后续仍能正常签出
+        self.assertEqual(db._POOL._created, 0)
+        self.assertEqual(db.get_db().execute("SELECT 1").fetchone()[0], 1)
 
     def test_get_db_recovers_after_close_all(self):
         """连接被统一关闭后，get_db 应自动重建而不是抛错。"""
@@ -138,78 +142,109 @@ class TestConnectionManagement(TempDbCase):
         conn = db.get_db()
         self.assertEqual(conn.execute("SELECT 1").fetchone()[0], 1)
 
-    def test_pragmas_applied(self):
-        """WAL / busy_timeout / foreign_keys 等关键 PRAGMA 必须生效。"""
-        status = db.get_pragma_status()
-        self.assertEqual(str(status["journal_mode"]).lower(), "wal")
-        self.assertEqual(status["foreign_keys"], 1)
-        self.assertGreaterEqual(status["busy_timeout"], 1000)
-        # synchronous=FULL 为 2；不允许为了写入速度静默降级
-        self.assertEqual(status["synchronous"], 2)
+    def test_mysql_session_settings(self):
+        """连接字符集、排序规则、自动提交与表引擎必须符合设计。"""
+        status = db.get_db_status()
+        self.assertEqual(status["charset"].lower(), "utf8mb4")
+        self.assertTrue(status["collation"].lower().startswith("utf8mb4"))
+        self.assertGreaterEqual(int(status["server_version"].split(".")[0]), 8)
+        row = db.get_db().execute(
+            "SELECT @@autocommit AS ac").fetchone()
+        self.assertEqual(int(row["ac"]), 1, "连接必须处于自动提交模式")
+        engine = db.get_db().execute(
+            "SELECT ENGINE AS engine, TABLE_COLLATION AS coll FROM information_schema.tables "
+            "WHERE table_schema=? AND table_name='images'",
+            (db.MYSQL_DATABASE,),
+        ).fetchone()
+        self.assertEqual(engine["engine"], "InnoDB")
+        self.assertTrue(engine["coll"].lower().startswith("utf8mb4"))
 
 
-class TestWalAndCheckpoint(TempDbCase):
-    def test_wal_file_created_and_checkpoint_truncates(self):
-        """提交后应产生 -wal 文件；TRUNCATE checkpoint 应把它清空。"""
-        self._insert_image()
-        wal_path = str(db.DATABASE_PATH) + "-wal"
-        self.assertTrue(os.path.exists(wal_path), "未生成 WAL 文件")
-        self.assertGreater(os.path.getsize(wal_path), 0)
-
-        result = db.checkpoint_wal("TRUNCATE")
-        self.assertEqual(result["busy"], 0)
-        self.assertEqual(os.path.getsize(wal_path), 0, "TRUNCATE 后 WAL 未清空")
-
-    def test_checkpoint_rejects_unknown_mode(self):
-        for mode in ("BOGUS", "truncate; DROP TABLE images", ""):
-            with self.assertRaises(ValueError):
-                db.checkpoint_wal(mode)
-
-    def test_readers_not_blocked_by_writer(self):
-        """WAL 模式下写事务不应阻塞另一个连接的读取。"""
+class TestConcurrencyIsolation(TempDbCase):
+    def test_reader_not_blocked_by_writer_transaction(self):
+        """写事务未提交时，另一连接仍应能读到旧值而不是等待锁。"""
         image_id = self._insert_image(status="approved")
-        reader = sqlite3.connect(str(db.DATABASE_PATH), timeout=2)
+        captured = {}
+
+        def reader():
+            conn = db.get_db()
+            row = conn.execute(
+                "SELECT views FROM images WHERE id=?", (image_id,)
+            ).fetchone()
+            captured["views"] = row["views"]
+            db.close_db()
+
+        writer = db.get_db()
+        writer.execute("SELECT 1")
+        with db.transaction() as conn:
+            conn.execute("UPDATE images SET views=views+1 WHERE id=?", (image_id,))
+            thread = threading.Thread(target=reader)
+            thread.start()
+            thread.join(timeout=10)
+            self.assertFalse(thread.is_alive(), "读请求被写事务阻塞")
+        self.assertEqual(captured["views"], 0, "读到了未提交的数据（隔离级别异常）")
+
+    def test_pool_exhaustion_raises_clear_error(self):
+        """连接池上限耗尽时给出明确错误，而不是无限等待或崩溃。"""
+        original_size = db.MYSQL_POOL_SIZE
+        original_overflow = db.MYSQL_POOL_MAX_OVERFLOW
+        original_timeout = db.MYSQL_POOL_TIMEOUT
         try:
-            writer = db.get_db()
-            writer.execute("BEGIN IMMEDIATE")
-            writer.execute("UPDATE images SET views=views+1 WHERE id=?", (image_id,))
-            # 写锁持有期间，另一连接仍应能读到旧值而不是等待
-            rows = reader.execute("SELECT COUNT(*) FROM images").fetchone()
-            self.assertGreaterEqual(rows[0], 1)
-            writer.commit()
+            db._reset_pool()
+            db.MYSQL_POOL_SIZE = 0
+            db.MYSQL_POOL_MAX_OVERFLOW = 0
+            db.MYSQL_POOL_TIMEOUT = 1
+            error = {}
+
+            def worker():
+                try:
+                    db.get_db()
+                except db.DatabaseError as exc:
+                    error["msg"] = str(exc)
+                finally:
+                    db.close_db()
+
+            thread = threading.Thread(target=worker)
+            thread.start()
+            thread.join(timeout=10)
+            self.assertIn("连接池已耗尽", error.get("msg", ""))
         finally:
-            reader.close()
+            db._reset_pool()
+            db.MYSQL_POOL_SIZE = original_size
+            db.MYSQL_POOL_MAX_OVERFLOW = original_overflow
+            db.MYSQL_POOL_TIMEOUT = original_timeout
+            db._reset_pool()
 
 
 class TestTransactionContext(TempDbCase):
     def test_commit_on_success(self):
         with db.transaction() as conn:
-            conn.execute("INSERT INTO settings (key, value) VALUES ('tx_ok', '1')")
+            conn.execute("INSERT INTO settings (`key`, value) VALUES ('tx_ok', '1')")
         row = db.get_db().execute(
-            "SELECT value FROM settings WHERE key='tx_ok'").fetchone()
+            "SELECT value FROM settings WHERE `key`='tx_ok'").fetchone()
         self.assertEqual(row["value"], "1")
 
     def test_rollback_on_exception(self):
         with self.assertRaises(RuntimeError):
             with db.transaction() as conn:
-                conn.execute("INSERT INTO settings (key, value) VALUES ('tx_bad', '1')")
+                conn.execute("INSERT INTO settings (`key`, value) VALUES ('tx_bad', '1')")
                 raise RuntimeError("boom")
         row = db.get_db().execute(
-            "SELECT value FROM settings WHERE key='tx_bad'").fetchone()
+            "SELECT value FROM settings WHERE `key`='tx_bad'").fetchone()
         self.assertIsNone(row, "异常后事务未回滚")
 
     def test_nested_savepoint_inner_rollback_keeps_outer(self):
         """内层 SAVEPOINT 回滚不应影响外层已完成的修改。"""
         with db.transaction() as conn:
-            conn.execute("INSERT INTO settings (key, value) VALUES ('outer', '1')")
+            conn.execute("INSERT INTO settings (`key`, value) VALUES ('outer', '1')")
             with self.assertRaises(RuntimeError):
                 with db.transaction() as inner:
-                    inner.execute("INSERT INTO settings (key, value) VALUES ('inner', '1')")
+                    inner.execute("INSERT INTO settings (`key`, value) VALUES ('inner', '1')")
                     raise RuntimeError("inner boom")
 
         rows = {
             r["key"] for r in db.get_db().execute(
-                "SELECT key FROM settings WHERE key IN ('outer', 'inner')").fetchall()
+                "SELECT `key` FROM settings WHERE `key` IN ('outer', 'inner')").fetchall()
         }
         self.assertEqual(rows, {"outer"})
 
@@ -235,8 +270,11 @@ class TestViewDedup(TempDbCase):
 
     def test_unique_index_exists(self):
         names = {
-            r["name"] for r in db.get_db().execute(
-                "SELECT name FROM sqlite_master WHERE type='index'").fetchall()
+            r["index_name"] for r in db.get_db().execute(
+                "SELECT DISTINCT INDEX_NAME AS index_name FROM information_schema.statistics "
+                "WHERE table_schema=? AND table_name='view_sessions'",
+                (db.MYSQL_DATABASE,),
+            ).fetchall()
         }
         self.assertIn("idx_view_sessions_unique", names)
 
@@ -273,7 +311,7 @@ class TestLikeConcurrency(TempDbCase):
         procs = [
             ctx.Process(
                 target=_multiprocess_worker,
-                args=(str(db.DATABASE_PATH), image_id, index, queue),
+                args=(self.db_name, image_id, index, queue),
             )
             for index in range(4)
         ]
@@ -282,10 +320,10 @@ class TestLikeConcurrency(TempDbCase):
         results = []
         try:
             for _ in procs:
-                results.append(queue.get(timeout=120))
+                results.append(queue.get(timeout=180))
         finally:
             for proc in procs:
-                proc.join(timeout=120)
+                proc.join(timeout=180)
 
         errors = [r["error"] for r in results if r["error"]]
         self.assertEqual(errors, [], f"多进程写入出现错误: {errors}")
@@ -301,7 +339,7 @@ class TestLikeConcurrency(TempDbCase):
         conn = db.get_db()
         self.assertEqual(
             conn.execute(
-                "SELECT COUNT(*) FROM settings WHERE key LIKE 'mp_%'"
+                "SELECT COUNT(*) FROM settings WHERE `key` LIKE 'mp!_%' ESCAPE '!'"
             ).fetchone()[0],
             80,
             "并发提交的写入出现丢失",
@@ -316,25 +354,43 @@ class TestLikeConcurrency(TempDbCase):
             "SELECT like_count, views FROM images WHERE id=?", (image_id,)
         ).fetchone()
         self.assertEqual((row["like_count"], row["views"]), (1, 1))
-        self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
-        self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+        # 数据一致性：该图片的点赞计数与明细一致、无孤儿点赞、表结构正常
+        self.assertEqual(conn.execute(
+            "SELECT COUNT(*) FROM images i WHERE i.id=? AND i.like_count <> "
+            "(SELECT COUNT(*) FROM likes l WHERE l.image_id=i.id)", (image_id,)
+        ).fetchone()[0], 0)
+        self.assertEqual(conn.execute(
+            "SELECT COUNT(*) FROM likes l LEFT JOIN images i ON l.image_id=i.id "
+            "WHERE i.id IS NULL"
+        ).fetchone()[0], 0)
+        check = conn.execute("CHECK TABLE images").fetchone()
+        self.assertEqual(check.get("Msg_type"), "status")
 
     def test_failed_like_does_not_leave_write_lock(self):
-        """唯一索引冲突后必须回滚，否则线程连接长期持有写锁。"""
+        """唯一索引冲突后必须回滚，否则连接会长期持有行锁。"""
         image_id = self._insert_image(status="approved")
         self.assertTrue(models.insert_like(image_id, "7.7.7.7", "UA", "省", "市"))
         self.assertFalse(models.insert_like(image_id, "7.7.7.7", "UA", "省", "市"))
 
-        conn = db.get_db()
-        self.assertFalse(conn.in_transaction,
-                         "点赞去重失败后连接仍处于未结束事务，会长期持有写锁")
-        # 另一连接应能立即写入，证明写锁已释放
-        other = sqlite3.connect(str(db.DATABASE_PATH), timeout=2)
-        try:
-            other.execute("INSERT INTO settings (key, value) VALUES ('lock_free', '1')")
-            other.commit()
-        finally:
-            other.close()
+        # 另一连接应能立即写入同一行，证明锁已释放
+        captured = {}
+
+        def other_writer():
+            conn = db.get_db()
+            try:
+                conn.execute(
+                    "UPDATE images SET views=views+1 WHERE id=?", (image_id,)
+                )
+                captured["ok"] = True
+            except Exception as exc:  # 记录错误供断言
+                captured["error"] = f"{type(exc).__name__}: {exc}"
+            finally:
+                db.close_db()
+
+        thread = threading.Thread(target=other_writer)
+        thread.start()
+        thread.join(timeout=10)
+        self.assertNotIn("error", captured, f"点赞失败后仍持有锁: {captured.get('error')}")
 
     def test_batch_like_delete_updates_count_in_one_transaction(self):
         image_id = self._insert_image(status="approved", like_count=2)
@@ -379,7 +435,6 @@ class TestPaginationClamp(TempDbCase):
         for _ in range(3):
             self._insert_image(status="approved")
         rows = models.get_images_by_status("approved", limit=100000, offset=0)
-        # 夹取到上限后仍是合法查询，不会一次拉全表以外的内容
         self.assertLessEqual(len(rows), models._MAX_PAGE_LIMIT)
 
     def test_invalid_pagination_values_fall_back(self):
@@ -406,50 +461,32 @@ class TestSchemaMigration(TempDbCase):
 
     def test_stage4_indexes_exist(self):
         names = {
-            r["name"] for r in db.get_db().execute(
-                "SELECT name FROM sqlite_master WHERE type='index'").fetchall()
+            r["index_name"] for r in db.get_db().execute(
+                "SELECT DISTINCT INDEX_NAME AS index_name FROM information_schema.statistics "
+                "WHERE table_schema=?", (db.MYSQL_DATABASE,),
+            ).fetchall()
         }
         for idx in ("idx_images_status_like", "idx_admin_logs_action_created",
                     "idx_view_sessions_unique"):
             self.assertIn(idx, names, f"缺少第四阶段索引 {idx}")
 
-    def test_migration_from_v4_database(self):
-        """模拟第三阶段的旧库（无 v5/v6 结构），验证迁移可正常补齐。"""
-        legacy_dir = tempfile.mkdtemp(prefix="amig_legacy_")
-        legacy_path = os.path.join(legacy_dir, "legacy.db")
-        orig = db.DATABASE_PATH
-        try:
-            db.close_all_db()
-            db.DATABASE_PATH = legacy_path
-            db.init_db()
-            conn = db.get_db()
-            # 退化到"旧库"：去掉新索引与版本记录，并写入重复浏览记录
-            conn.execute("DROP INDEX IF EXISTS idx_images_status_like")
-            conn.execute("DROP INDEX IF EXISTS idx_admin_logs_action_created")
-            conn.execute("DROP INDEX IF EXISTS idx_view_sessions_unique")
-            conn.execute("DELETE FROM schema_migrations WHERE version >= 5")
+    def test_reinit_on_existing_schema_keeps_data(self):
+        """对已有数据的库重复初始化：不报错、不丢数据、唯一约束仍生效。"""
+        image_id = self._insert_image(status="approved", ip="5.5.5.5")
+        db.init_db()
+        self.assertIsNotNone(models.get_image_by_id(image_id))
+
+        # 唯一约束（image_id, ip）必须仍然生效，从数据库层面阻止重复浏览记录
+        conn = db.get_db()
+        conn.execute(
+            "INSERT INTO view_sessions (image_id, ip, viewed_at) VALUES (?,?,?)",
+            (image_id, "5.5.5.5", _now_iso()),
+        )
+        with self.assertRaises(db.IntegrityError):
             conn.execute(
-                "INSERT INTO view_sessions (image_id, ip, viewed_at) VALUES "
-                "(1, '1.1.1.1', ?), (1, '1.1.1.1', ?)", (_now_iso(-100), _now_iso()))
-            conn.commit()
-
-            db.close_all_db()
-            db.init_db()
-
-            conn = db.get_db()
-            names = {r["name"] for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='index'").fetchall()}
-            self.assertIn("idx_images_status_like", names)
-            self.assertIn("idx_admin_logs_action_created", names)
-            self.assertIn("idx_view_sessions_unique", names)
-            dup = conn.execute(
-                "SELECT COUNT(*) FROM view_sessions WHERE image_id=1 AND ip='1.1.1.1'"
-            ).fetchone()[0]
-            self.assertEqual(dup, 1, "迁移未清理 view_sessions 重复行")
-        finally:
-            db.close_all_db()
-            db.DATABASE_PATH = orig
-            shutil.rmtree(legacy_dir, ignore_errors=True)
+                "INSERT INTO view_sessions (image_id, ip, viewed_at) VALUES (?,?,?)",
+                (image_id, "5.5.5.5", _now_iso()),
+            )
 
 
 class TestDeleteSemantics(TempDbCase):

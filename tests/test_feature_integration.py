@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from PIL import Image
+from pymysql.err import IntegrityError
 
 import app.auth as auth
 import app.database as database
@@ -17,25 +18,23 @@ import app.models as models
 import app.routes.front as front
 from app.auth import hash_password
 from app.main import app
+from tests.mysql_test_utils import create_test_database, drop_test_database
 
 
 class FeatureIntegrationTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        # 业务数据存放在独立 MySQL 测试库；上传目录仍使用临时目录
+        cls.db_name = create_test_database()
         cls.tmpdir = tempfile.mkdtemp(prefix="amig-test-")
-        cls.db_path = os.path.join(cls.tmpdir, "app.db")
         cls.upload_dir = os.path.join(cls.tmpdir, "uploads")
         cls.private_dir = os.path.join(cls.tmpdir, "private_uploads")
-        cls.original_db_path = database.DATABASE_PATH
         cls.original_upload_dir = image_utils.UPLOADS_DIR
         cls.original_private_dir = image_utils.PRIVATE_UPLOADS_DIR
-        database.close_db()
-        database.DATABASE_PATH = cls.db_path
         image_utils.UPLOADS_DIR = cls.upload_dir
         image_utils.PRIVATE_UPLOADS_DIR = cls.private_dir
         os.makedirs(cls.upload_dir, exist_ok=True)
         os.makedirs(cls.private_dir, exist_ok=True)
-        database.init_db()
         models.set_setting("admin_domain", "admin.test")
         models.set_setting("enable_captcha", "0")
         models.set_setting("enable_dedup", "0")
@@ -47,8 +46,7 @@ class FeatureIntegrationTest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        database.close_db()
-        database.DATABASE_PATH = cls.original_db_path
+        drop_test_database(cls.db_name)
         image_utils.UPLOADS_DIR = cls.original_upload_dir
         image_utils.PRIVATE_UPLOADS_DIR = cls.original_private_dir
         shutil.rmtree(cls.tmpdir, ignore_errors=True)
@@ -339,8 +337,28 @@ class FeatureIntegrationTest(unittest.TestCase):
 
     def test_database_constraints_foreign_keys_and_allowed_stats(self):
         conn = database.get_db()
-        self.assertEqual(conn.execute("PRAGMA foreign_keys").fetchone()[0], 1)
-        self.assertEqual(conn.execute("PRAGMA journal_mode").fetchone()[0].lower(), "wal")
+        # 外键约束必须真实生效：插入引用不存在图片的点赞记录应被数据库拒绝
+        with self.assertRaises(IntegrityError):
+            conn.execute(
+                "INSERT INTO likes (image_id, ip, ua_hash, province, city, created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (999999, "1.1.1.1", "fk-check", "", "", models.now_iso()),
+            )
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM likes WHERE ua_hash='fk-check'"
+            ).fetchone()[0],
+            0,
+        )
+        # MySQL 下不再有 WAL 概念，等价断言为：表使用 InnoDB + utf8mb4（含 emoji）
+        table_meta = conn.execute(
+            "SELECT ENGINE AS engine, TABLE_COLLATION AS collation "
+            "FROM information_schema.tables WHERE table_schema=? AND table_name='images'",
+            (database.MYSQL_DATABASE,),
+        ).fetchone()
+        self.assertIsNotNone(table_meta)
+        self.assertEqual(table_meta["engine"], "InnoDB")
+        self.assertRegex(table_meta["collation"], r"^utf8mb4")
         models.upsert_page(0, "unique-page", "标题", "内容", 1, 1)
         with self.assertRaises(Exception):
             models.upsert_page(0, "unique-page", "重复", "", 2, 1)

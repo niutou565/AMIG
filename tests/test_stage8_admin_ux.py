@@ -15,26 +15,29 @@ import app.image_utils as image_utils
 import app.models as models
 import app.routes.admin as admin_routes
 from app.main import app
+from tests.mysql_test_utils import create_test_database, drop_test_database
 
 CSRF_RE = re.compile(r'name="csrf_token" value="([^"]+)"')
+
+
+def _reset_db_pool():
+    """关闭全部连接并重置连接池（用例间彻底隔离）。"""
+    database.close_all_db()
 
 
 class AdminUxTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmpdir = tempfile.mkdtemp(prefix="amig-stage8-")
-        cls._orig_db = database.DATABASE_PATH
+        cls.db_name = create_test_database()
         cls._orig_uploads = image_utils.UPLOADS_DIR
         cls._orig_private = image_utils.PRIVATE_UPLOADS_DIR
         cls._orig_admin_uploads = admin_routes.UPLOADS_DIR
-        database.close_all_db()
-        database.DATABASE_PATH = os.path.join(cls.tmpdir, "app.db")
         image_utils.UPLOADS_DIR = os.path.join(cls.tmpdir, "uploads")
         image_utils.PRIVATE_UPLOADS_DIR = os.path.join(cls.tmpdir, "private_uploads")
         admin_routes.UPLOADS_DIR = image_utils.UPLOADS_DIR
         os.makedirs(image_utils.UPLOADS_DIR, exist_ok=True)
         os.makedirs(image_utils.PRIVATE_UPLOADS_DIR, exist_ok=True)
-        database.init_db()
         models.set_setting("admin_domain", "admin.test")
         models.set_setting("admin_domain_initialized", "1")
         models.set_setting("enable_captcha", "0")
@@ -49,14 +52,16 @@ class AdminUxTestCase(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        database.close_all_db()
-        database.DATABASE_PATH = cls._orig_db
+        drop_test_database(cls.db_name)
         image_utils.UPLOADS_DIR = cls._orig_uploads
         image_utils.PRIVATE_UPLOADS_DIR = cls._orig_private
         admin_routes.UPLOADS_DIR = cls._orig_admin_uploads
         shutil.rmtree(cls.tmpdir, ignore_errors=True)
 
     # ---------- 辅助方法 ----------
+
+    def tearDown(self):
+        _reset_db_pool()
 
     def client(self):
         return TestClient(app, base_url="https://admin.test",

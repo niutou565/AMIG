@@ -24,6 +24,7 @@ import app.routes.admin as admin_routes
 import app.routes.front as front
 from app.auth import hash_password
 from app.main import app
+from tests.mysql_test_utils import create_test_database, drop_test_database
 
 CSRF_RE = re.compile(r'name="csrf_token" value="([^"]+)"')
 
@@ -51,6 +52,11 @@ def _list_files(root):
         for name in filenames:
             result.add(os.path.join(dirpath, name))
     return result
+
+
+def _release_thread_connections():
+    """关闭全部数据库连接并重置连接池（用例间彻底隔离）。"""
+    database.close_all_db()
 
 
 class TestPixelLimit(unittest.TestCase):
@@ -223,17 +229,12 @@ class TestLoginRateLimit(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.tmpdir = tempfile.mkdtemp(prefix="amig-rate-")
-        cls._orig_db = database.DATABASE_PATH
-        database.close_db()
-        database.DATABASE_PATH = os.path.join(cls.tmpdir, "app.db")
-        database.init_db()
+        cls.db_name = create_test_database()
 
     @classmethod
     def tearDownClass(cls):
-        database.close_db()
-        database.DATABASE_PATH = cls._orig_db
-        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+        _release_thread_connections()
+        drop_test_database(cls.db_name)
 
     def setUp(self):
         auth.clear_login_rate_limits()
@@ -255,7 +256,7 @@ class TestLoginRateLimit(unittest.TestCase):
             - timedelta(minutes=auth.LOGIN_IP_WINDOW_MINUTES + 1)
         ).isoformat(timespec="seconds")
         conn.execute(
-            "INSERT INTO login_rate_limits (key, attempts, window_start, updated_at) VALUES (?,?,?,?)",
+            "INSERT INTO login_rate_limits (`key`, attempts, window_start, updated_at) VALUES (?,?,?,?)",
             ("ip:old-ip", auth.LOGIN_IP_MAX_ATTEMPTS, expired, expired),
         )
         conn.commit()
@@ -263,7 +264,7 @@ class TestLoginRateLimit(unittest.TestCase):
         auth.record_login_failure("new-ip")
         self.assertIsNone(
             conn.execute(
-                "SELECT 1 FROM login_rate_limits WHERE key='ip:old-ip'"
+                "SELECT 1 FROM login_rate_limits WHERE `key`='ip:old-ip'"
             ).fetchone()
         )
 
@@ -274,33 +275,32 @@ class TestSecurityIntegration(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmpdir = tempfile.mkdtemp(prefix="amig-sec-")
-        cls.db_path = os.path.join(cls.tmpdir, "app.db")
         cls.upload_dir = os.path.join(cls.tmpdir, "uploads")
         cls.private_dir = os.path.join(cls.tmpdir, "private_uploads")
-        cls._orig_db = database.DATABASE_PATH
         cls._orig_uploads = image_utils.UPLOADS_DIR
         cls._orig_private = image_utils.PRIVATE_UPLOADS_DIR
         cls._orig_admin_uploads = admin_routes.UPLOADS_DIR
-        database.close_db()
-        database.DATABASE_PATH = cls.db_path
+        cls.db_name = create_test_database()
         image_utils.UPLOADS_DIR = cls.upload_dir
         image_utils.PRIVATE_UPLOADS_DIR = cls.private_dir
         admin_routes.UPLOADS_DIR = cls.upload_dir
         os.makedirs(cls.upload_dir, exist_ok=True)
         os.makedirs(cls.private_dir, exist_ok=True)
-        database.init_db()
         models.set_setting("admin_domain", "admin.test")
         models.set_setting("enable_captcha", "0")
         models.set_setting("enable_dedup", "0")
 
     @classmethod
     def tearDownClass(cls):
-        database.close_db()
-        database.DATABASE_PATH = cls._orig_db
+        _release_thread_connections()
+        drop_test_database(cls.db_name)
         image_utils.UPLOADS_DIR = cls._orig_uploads
         image_utils.PRIVATE_UPLOADS_DIR = cls._orig_private
         admin_routes.UPLOADS_DIR = cls._orig_admin_uploads
         shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def tearDown(self):
+        _release_thread_connections()
 
     def client(self, host="admin.test"):
         return TestClient(app, base_url=f"https://{host}", raise_server_exceptions=False)
@@ -722,21 +722,16 @@ class TestSecurityIntegration(unittest.TestCase):
 
 
 class DbUnitTestCase(unittest.TestCase):
-    """使用独立临时数据库的单元测试基类"""
+    """使用独立 MySQL 测试库的单元测试基类"""
 
     @classmethod
     def setUpClass(cls):
-        cls._tmpdir = tempfile.mkdtemp()
-        cls._orig = database.DATABASE_PATH
-        database.close_db()
-        database.DATABASE_PATH = os.path.join(cls._tmpdir, "unit.db")
-        database.init_db()
+        cls.db_name = create_test_database()
 
     @classmethod
     def tearDownClass(cls):
-        database.close_db()
-        database.DATABASE_PATH = cls._orig
-        shutil.rmtree(cls._tmpdir, ignore_errors=True)
+        _release_thread_connections()
+        drop_test_database(cls.db_name)
 
     def _insert_approved(self, md5, like_count):
         image_id = models.insert_image(

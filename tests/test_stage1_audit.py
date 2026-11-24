@@ -25,21 +25,24 @@ import app.main as main_module
 import app.middleware as middleware
 import app.models as models
 from app.main import app
+from tests.mysql_test_utils import create_test_database, drop_test_database
 
 CSRF_RE = re.compile(r'name="csrf_token" value="([^"]+)"')
+
+
+def _release_thread_connections():
+    """关闭全部数据库连接并重置连接池（用例间彻底隔离）。"""
+    database.close_all_db()
 
 
 class Stage1AuditTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmpdir = tempfile.mkdtemp(prefix="amig-stage1-")
-        cls.original_db_path = database.DATABASE_PATH
         cls.original_upload_dir = image_utils.UPLOADS_DIR
-        database.close_db()
-        database.DATABASE_PATH = os.path.join(cls.tmpdir, "app.db")
+        cls.db_name = create_test_database()
         image_utils.UPLOADS_DIR = os.path.join(cls.tmpdir, "uploads")
         os.makedirs(image_utils.UPLOADS_DIR, exist_ok=True)
-        database.init_db()
 
         models.set_setting("admin_domain", "admin.test")
         models.set_setting("admin_domain_initialized", "1")
@@ -55,10 +58,13 @@ class Stage1AuditTest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        database.close_db()
-        database.DATABASE_PATH = cls.original_db_path
+        _release_thread_connections()
+        drop_test_database(cls.db_name)
         image_utils.UPLOADS_DIR = cls.original_upload_dir
         shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def tearDown(self):
+        _release_thread_connections()
 
     # ---------- 辅助方法 ----------
 
@@ -312,7 +318,7 @@ class Stage1AuditTest(unittest.TestCase):
             client = self._client()
             self._login(client)
         row = database.get_db().execute(
-            "SELECT 1 FROM login_rate_limits WHERE key='ip:testclient'"
+            "SELECT 1 FROM login_rate_limits WHERE `key`='ip:testclient'"
         ).fetchone()
         self.assertIsNone(row, "登录成功后应清除该 IP 的失败计数")
 

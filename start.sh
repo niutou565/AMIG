@@ -63,7 +63,7 @@ echo "[*] Upgrading pip..."
 pip install --upgrade pip >/dev/null 2>&1 || true
 
 echo "[*] Checking dependencies..."
-if ! python -c "import fastapi, uvicorn, multipart, PIL, bcrypt, aiofiles, jinja2, httpx" >/dev/null 2>&1; then
+if ! python -c "import fastapi, uvicorn, multipart, PIL, bcrypt, aiofiles, jinja2, httpx, pymysql" >/dev/null 2>&1; then
     echo "[*] Installing dependencies..."
     pip install -r "$SCRIPT_DIR/requirements.txt" || {
         echo "[ERROR] Dependency installation failed."
@@ -88,19 +88,16 @@ else
     echo "[OK] .env config file exists"
 fi
 
-# ========== Step 6: 初始化数据库 ==========
+# ========== Step 6: 初始化数据库（MySQL，幂等） ==========
 echo ""
 echo "[*] Initializing database..."
 mkdir -p "$SCRIPT_DIR/data"
-if [ -f "$SCRIPT_DIR/data/app.db" ]; then
-    echo "[OK] Database already exists, skipping init"
-else
-    python "$SCRIPT_DIR/init_db.py" || {
-        echo "[ERROR] Database initialization failed"
-        exit 1
-    }
-    echo "[OK] Database initialized"
-fi
+python "$SCRIPT_DIR/init_db.py" || {
+    echo "[ERROR] Database initialization failed."
+    echo "        Please check MYSQL_HOST / MYSQL_PORT / MYSQL_DATABASE / MYSQL_USER / MYSQL_PASSWORD"
+    echo "        in .env, and make sure MySQL 8.0+ is running."
+    exit 1
+}
 
 # ========== Step 7: 检查端口 ==========
 echo ""

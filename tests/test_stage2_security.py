@@ -19,10 +19,17 @@ import app.image_utils as image_utils
 import app.ip_geo as ip_geo
 import app.models as models
 import app.routes.admin as admin_routes
+from app.config import MYSQL_HOST, MYSQL_PASSWORD, MYSQL_PORT, MYSQL_USER
 from app.main import app
 from app.password_policy import validate_password
+from tests.mysql_test_utils import create_test_database, drop_test_database
 
 CSRF_RE = re.compile(r'name="csrf_token" value="([^"]+)"')
+
+
+def _release_thread_connections():
+    """关闭全部数据库连接并重置连接池（用例间彻底隔离）。"""
+    database.close_all_db()
 
 
 class PasswordPolicyTest(unittest.TestCase):
@@ -56,18 +63,15 @@ class Stage2SecurityTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmpdir = tempfile.mkdtemp(prefix="amig-stage2-")
-        cls._orig_db = database.DATABASE_PATH
         cls._orig_uploads = image_utils.UPLOADS_DIR
         cls._orig_private = image_utils.PRIVATE_UPLOADS_DIR
         cls._orig_admin_uploads = admin_routes.UPLOADS_DIR
-        database.close_db()
-        database.DATABASE_PATH = os.path.join(cls.tmpdir, "app.db")
+        cls.db_name = create_test_database()
         image_utils.UPLOADS_DIR = os.path.join(cls.tmpdir, "uploads")
         image_utils.PRIVATE_UPLOADS_DIR = os.path.join(cls.tmpdir, "private_uploads")
         admin_routes.UPLOADS_DIR = image_utils.UPLOADS_DIR
         os.makedirs(image_utils.UPLOADS_DIR, exist_ok=True)
         os.makedirs(image_utils.PRIVATE_UPLOADS_DIR, exist_ok=True)
-        database.init_db()
         models.set_setting("admin_domain", "admin.test")
         models.set_setting("admin_domain_initialized", "1")
         models.set_setting("enable_captcha", "0")
@@ -77,8 +81,8 @@ class Stage2SecurityTest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        database.close_db()
-        database.DATABASE_PATH = cls._orig_db
+        _release_thread_connections()
+        drop_test_database(cls.db_name)
         image_utils.UPLOADS_DIR = cls._orig_uploads
         image_utils.PRIVATE_UPLOADS_DIR = cls._orig_private
         admin_routes.UPLOADS_DIR = cls._orig_admin_uploads
@@ -148,6 +152,9 @@ class Stage2SecurityTest(unittest.TestCase):
 
     def setUp(self):
         auth.clear_login_rate_limits()
+
+    def tearDown(self):
+        _release_thread_connections()
 
     # ---------- 密码修改 ----------
 
@@ -357,7 +364,7 @@ class Stage2SecurityTest(unittest.TestCase):
             )
         self.assertIsNone(
             database.get_db().execute(
-                "SELECT 1 FROM login_rate_limits WHERE key='ip:testclient'"
+                "SELECT 1 FROM login_rate_limits WHERE `key`='ip:testclient'"
             ).fetchone()
         )
 
@@ -551,86 +558,73 @@ class Stage2SecurityTest(unittest.TestCase):
 
 class DatabaseInitRetryTest(unittest.TestCase):
     def test_retries_on_lock_and_succeeds(self):
-        import sqlite3
         with patch.object(
             database, "_init_db_once",
-            side_effect=[sqlite3.OperationalError("database is locked"), None],
+            side_effect=[
+                database.OperationalError(1205, "database is locked"),
+                None,
+            ],
         ) as mocked, patch.object(database.time, "sleep") as sleeper:
             database.init_db(max_wait_seconds=1)
         self.assertEqual(mocked.call_count, 2)
         sleeper.assert_called_once()
 
     def test_does_not_retry_unrelated_errors(self):
-        import sqlite3
         with patch.object(
             database, "_init_db_once",
-            side_effect=sqlite3.OperationalError("no such table: images"),
+            side_effect=database.OperationalError(1146, "no such table: images"),
         ) as mocked:
-            with self.assertRaises(sqlite3.OperationalError):
+            with self.assertRaises(database.OperationalError):
                 database.init_db(max_wait_seconds=1)
         self.assertEqual(mocked.call_count, 1)
 
 
 class LegacySessionMigrationTest(unittest.TestCase):
     def test_old_sessions_get_new_columns_and_csrf_token(self):
-        tmpdir = tempfile.mkdtemp(prefix="amig-session-migration-")
-        db_path = os.path.join(tmpdir, "app.db")
-        import sqlite3
-        conn = sqlite3.connect(db_path)
-        conn.execute(
-            "CREATE TABLE sessions (session_id TEXT PRIMARY KEY, admin_id INTEGER NOT NULL, "
-            "username TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL)"
-        )
-        now = datetime.now(timezone.utc)
-        conn.execute(
-            "INSERT INTO sessions VALUES (?,?,?,?,?)",
-            (
-                "legacy-session", 1, "legacy-admin",
-                now.isoformat(timespec="seconds"),
-                (now + timedelta(hours=1)).isoformat(timespec="seconds"),
-            ),
-        )
-        conn.commit()
-        conn.close()
-
-        original = database.DATABASE_PATH
-        database.close_db()
-        database.DATABASE_PATH = db_path
+        db_name = create_test_database()
         try:
-            database.init_db()
+            now = datetime.now(timezone.utc)
+            database.get_db().execute(
+                "INSERT INTO sessions (session_id, admin_id, username, created_at, "
+                "expires_at) VALUES (?,?,?,?,?)",
+                (
+                    "legacy-session", 1, "legacy-admin",
+                    now.isoformat(timespec="seconds"),
+                    (now + timedelta(hours=1)).isoformat(timespec="seconds"),
+                ),
+            )
+            database.get_db().commit()
+
             columns = {
                 row["name"]
-                for row in database.get_db().execute("PRAGMA table_info(sessions)").fetchall()
+                for row in database.get_db().execute(
+                    "SELECT COLUMN_NAME AS name FROM information_schema.columns "
+                    "WHERE table_schema=? AND table_name=?",
+                    (database.MYSQL_DATABASE, "sessions"),
+                ).fetchall()
             }
             self.assertIn("csrf_token", columns)
             self.assertIn("last_seen_at", columns)
-            row = database.get_db().execute(
-                "SELECT last_seen_at FROM sessions WHERE session_id='legacy-session'"
-            ).fetchone()
-            self.assertTrue(row["last_seen_at"])
 
+            # 旧会话缺少 last_seen_at / csrf_token 时，读取应惰性补齐
             session = auth.get_session("legacy-session")
             self.assertIsNotNone(session)
             self.assertTrue(session["csrf_token"])
-            db_token = database.get_db().execute(
-                "SELECT csrf_token FROM sessions WHERE session_id='legacy-session'"
-            ).fetchone()["csrf_token"]
-            self.assertEqual(session["csrf_token"], db_token)
+            row = database.get_db().execute(
+                "SELECT last_seen_at, csrf_token FROM sessions "
+                "WHERE session_id='legacy-session'"
+            ).fetchone()
+            self.assertTrue(row["last_seen_at"])
+            self.assertEqual(session["csrf_token"], row["csrf_token"])
         finally:
-            database.close_db()
-            database.DATABASE_PATH = original
-            shutil.rmtree(tmpdir, ignore_errors=True)
+            _release_thread_connections()
+            drop_test_database(db_name)
 
 
 class ResetPasswordScriptTest(unittest.TestCase):
     def test_reset_script_stdin_revokes_sessions_and_hides_password(self):
-        tmpdir = tempfile.mkdtemp(prefix="amig-reset-")
-        db_path = os.path.join(tmpdir, "app.db")
-        original = database.DATABASE_PATH
-        database.close_db()
-        database.DATABASE_PATH = db_path
+        db_name = create_test_database()
         try:
-            database.init_db()
             admin_id = database.get_db().execute(
                 "INSERT INTO admins (username, password_hash, created_at) VALUES (?,?,?)",
                 ("admin", auth.hash_password("Old-Password-123"), models.now_iso()),
@@ -642,41 +636,47 @@ class ResetPasswordScriptTest(unittest.TestCase):
                  models.now_iso(), "old-token"),
             )
             database.get_db().commit()
+
+            new_password = "Reset-Password-789"
+            env = dict(
+                os.environ,
+                MYSQL_HOST=MYSQL_HOST,
+                MYSQL_PORT=str(MYSQL_PORT),
+                MYSQL_USER=MYSQL_USER,
+                MYSQL_PASSWORD=MYSQL_PASSWORD,
+                MYSQL_DATABASE=db_name,
+            )
+            result = subprocess.run(
+                [sys.executable, "reset_password.py", "--stdin", "--yes"],
+                input=new_password + "\n",
+                capture_output=True,
+                text=True,
+                cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                env=env,
+                timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn(new_password, result.stdout)
+            self.assertNotIn("$2b$", result.stdout)
+
+            row = database.get_db().execute(
+                "SELECT password_hash, login_attempts, locked_until FROM admins"
+            ).fetchone()
+            self.assertTrue(auth.verify_password(new_password, row["password_hash"]))
+            self.assertEqual(row["login_attempts"], 0)
+            self.assertIsNone(row["locked_until"])
+            self.assertIsNone(
+                database.get_db().execute("SELECT 1 FROM sessions").fetchone()
+            )
+
+            rejected = subprocess.run(
+                [sys.executable, "reset_password.py", "--password", "x", "--yes"],
+                capture_output=True, text=True,
+                cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                timeout=30,
+            )
+            self.assertEqual(rejected.returncode, 1)
+            self.assertIn("已移除 --password", rejected.stdout)
         finally:
-            database.close_db()
-            database.DATABASE_PATH = original
-
-        new_password = "Reset-Password-789"
-        env = dict(os.environ, DATABASE_PATH=db_path)
-        result = subprocess.run(
-            [sys.executable, "reset_password.py", "--stdin", "--yes"],
-            input=new_password + "\n",
-            capture_output=True,
-            text=True,
-            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            env=env,
-            timeout=30,
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertNotIn(new_password, result.stdout)
-        self.assertNotIn("$2b$", result.stdout)
-
-        import sqlite3
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        row = conn.execute("SELECT password_hash, login_attempts, locked_until FROM admins").fetchone()
-        self.assertTrue(auth.verify_password(new_password, row["password_hash"]))
-        self.assertEqual(row["login_attempts"], 0)
-        self.assertIsNone(row["locked_until"])
-        self.assertIsNone(conn.execute("SELECT 1 FROM sessions").fetchone())
-        conn.close()
-        shutil.rmtree(tmpdir, ignore_errors=True)
-
-        rejected = subprocess.run(
-            [sys.executable, "reset_password.py", "--password", "x", "--yes"],
-            capture_output=True, text=True,
-            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            timeout=30,
-        )
-        self.assertEqual(rejected.returncode, 1)
-        self.assertIn("已移除 --password", rejected.stdout)
+            _release_thread_connections()
+            drop_test_database(db_name)

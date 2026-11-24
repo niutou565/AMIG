@@ -1,8 +1,5 @@
 """管理域名统一配置验收测试"""
-import os
 import re
-import shutil
-import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -14,17 +11,13 @@ import app.database as database
 import app.models as models
 from app.auth import hash_password
 from app.main import app
+from tests.mysql_test_utils import create_test_database, drop_test_database
 
 
 class AdminDomainConfigTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.tmpdir = tempfile.mkdtemp(prefix="amig-domain-test-")
-        cls.db_path = os.path.join(cls.tmpdir, "app.db")
-        cls.original_db_path = database.DATABASE_PATH
-        database.close_db()
-        database.DATABASE_PATH = cls.db_path
-        database.init_db()
+        cls.db_name = create_test_database()
         database.get_db().execute(
             "INSERT INTO admins (username, password_hash, created_at) VALUES (?,?,?)",
             ("tester", hash_password("test-password"), models.now_iso()),
@@ -33,9 +26,7 @@ class AdminDomainConfigTest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        database.close_db()
-        database.DATABASE_PATH = cls.original_db_path
-        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+        drop_test_database(cls.db_name)
 
     def setUp(self):
         models.set_setting("admin_domain", "admin.test")
@@ -96,7 +87,7 @@ class AdminDomainConfigTest(unittest.TestCase):
         return client.post("/admin/settings", data=data, follow_redirects=follow_redirects)
 
     def delete_setting(self, key):
-        database.get_db().execute("DELETE FROM settings WHERE key=?", (key,))
+        database.get_db().execute("DELETE FROM settings WHERE `key`=?", (key,))
         database.get_db().commit()
 
     # ---------- 归一化 ----------

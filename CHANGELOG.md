@@ -2,6 +2,41 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)规范。
 
+## [未发布] - 2026-11-24
+
+> 数据库后端由 SQLite 迁移至 MySQL 8.0+。业务功能、接口与安全机制保持不变；旧 SQLite 数据可通过一次性迁移工具完整迁入。
+
+### 数据库层
+
+- `app/database.py` 重写为 MySQL 访问层（PyMySQL）：连接池（常驻 + 溢出、取连接超时）、空闲连接 ping 自动重连、线程/请求级连接复用、`transaction()` 事务与 SAVEPOINT 嵌套、统一的 `Row` 结果集适配（兼容旧的 `row["col"]` / `row[0]` 用法）
+- 新增请求级连接作用域中间件 `DBConnectionMiddleware`：请求结束归还连接，避免线程池线程长期占用连接导致连接池耗尽；归还前自动回滚残留事务
+- 连接池计数修正为幂等（关闭/丢弃只递减一次），`close_all_db()` 可重复调用
+- 单条语句遇死锁（1213）/锁等待超时（1205）自动重试；显式事务改用 `run_in_transaction_with_retry` 在事务边界整体重试
+- 表结构统一 InnoDB + utf8mb4 / utf8mb4_unicode_ci，主键 `INT AUTO_INCREMENT`，`likes` 增加指向 `images` 的真实外键（级联删除）
+
+### SQL 方言适配
+
+- 自增 ID 改用游标 `lastrowid`；`INSERT OR IGNORE` / `ON CONFLICT` 改为 `ON DUPLICATE KEY UPDATE`（含条件 UPSERT）
+- `MAX(0, x)` / `MIN(a,b)` / `RANDOM()` 改为 `GREATEST` / `LEAST` / `RAND()`；加权随机改用 `FLOOR(RAND()*...)`
+- `LIKE ... ESCAPE '\\'` 改为 `ESCAPE '!'`，避免 MySQL 字符串字面量反斜杠转义与 `NO_BACKSLASH_ESCAPES` 模式差异
+- 保留字 `key` / `date` 统一加反引号；`ONLY_FULL_GROUP_BY` 下使用 `ANY_VALUE()` 聚合
+- 上传额度「读-改-写」由 `BEGIN IMMEDIATE` 改为 `GET_LOCK` 命名锁串行化
+
+### 数据迁移与运维工具
+
+- 新增 `tools/migrate_sqlite_to_mysql.py`：只读打开旧库、迁移前后 SHA-256 校验、空库预检、字段长度预检、逐表事务、保留自增 ID 与关联、行数对比 + 逐字段内容级校验、失败定位到表/行/主键
+- 新增 `tools/mysql_cli.py`：定位 mysqldump / mysql 客户端，密码经 `MYSQL_PWD` 传递
+- `tools/backup_db.py` 重写为 `mysqldump --single-transaction` 方案：`.part` 原子写入、Dump 尾标与业务表结构校验、行数清单 manifest、保留份数与同秒唯一命名
+- `tools/restore_db.py` 重写：备份校验、恢复前自动回退副本、导入失败/校验失败自动回滚、上传归档配对校验与整目录原子切换、恢复后核对数据库引用文件
+- `tools/check_db.py` 重写为 MySQL 只读健康检查（版本/字符集/表与索引/行数/审核状态一致性/点赞漂移/孤儿点赞/备份目录安全）
+- `tools/check_uploads.py`、`tools/migrate_private_uploads.py` 改为数据库连通性检查（不再依赖库文件存在）
+
+### 配置、部署与测试
+
+- 环境变量改为 `DB_TYPE`、`MYSQL_HOST/PORT/DATABASE/USER/PASSWORD`、连接池与锁参数；`.env.example` 同步更新；密码不写日志、不进命令行
+- `start.bat` / `start.sh` / `start_bt.sh` 数据库初始化改为每次幂等执行 `init_db.py`（MySQL 连接失败给出明确提示）
+- 测试改为使用独立随机 MySQL 库（`tests/mysql_test_utils.py`），覆盖连接池、事务、并发、迁移、备份恢复等；`test_migration.py` 重写为 SQLite→MySQL 迁移工具测试
+
 ## [1.1.1] - 2026-11-24
 
 > 上传链路安全加固：针对发布后复审确认的三项安全与性能风险进行最小化修复，全部改动经全量回归测试（347 项测试 + 98 子测试）验证。

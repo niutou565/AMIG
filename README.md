@@ -26,7 +26,7 @@
 - **匿名易用**：访客无需注册即可上传、浏览、点赞图片
 - **内容可控**：所有上传图片需经管理员审核后才公开展示，拒绝即彻底删除
 - **安全防滥用**：内置限流、封禁、蜜罐、验证码、敏感词、图片去重等多重防护
-- **轻量高效**：SQLite 单文件数据库 + 纯 SQL 查询，无 ORM、无重框架，低内存占用
+- **轻量高效**：MySQL + 纯 SQL 参数化查询，无 ORM、无重框架，低内存占用
 
 适用场景：个人图床、小团队内部分享、兴趣社区、演示/教学项目等。
 
@@ -86,7 +86,7 @@ python tools/check_uploads.py --delete-temp        # 删除超过安全期限的
 
 ### 数据备份与恢复
 
-备份使用 SQLite Online Backup API 在 WAL 模式下取得一致性快照，**不是直接复制正在运行的 `.db` 文件**；数据库与 `uploads/`、`private_uploads/` 打包为同名配对文件。
+数据库为 MySQL 8.0+，备份使用 `mysqldump --single-transaction` 取得 InnoDB 一致性快照（不阻塞业务读写），**不是直接复制数据目录**；数据库与 `uploads/`、`private_uploads/` 可打包为同名配对文件。
 
 ```bash
 # 创建备份（数据库 + 图片，推荐）
@@ -95,25 +95,26 @@ python tools/backup_db.py --with-uploads
 # 查看备份（标记 [含上传归档] 的备份可连同图片一起恢复）
 python tools/restore_db.py --list
 
-# 校验备份：integrity_check + 外键 + 关键表 + 归档是否包含数据库引用的全部图片
-python tools/restore_db.py --backup backups/backup_20260101T000000Z.db --check
+# 校验备份：Dump completed 尾标 + 15 张业务表结构 + 行数清单 + 归档是否包含数据库引用的全部图片
+python tools/restore_db.py --backup backups/backup_20260101T000000Z.sql --check
 ```
 
 - 备份默认保存在 `backups/`（可用 `BACKUP_DIR` 修改），保留最近 `BACKUP_KEEP` 份（默认 7）。该目录**不得**位于 `uploads/`、`private_uploads/` 或任何 Nginx 静态目录内。
-- 生成文件为 `backup_<UTC 时间>.db` 与 `backup_<UTC 时间>_uploads.tar.gz`。备份先写 `.part`，完整性校验通过后才改名；失败不会覆盖已有的有效备份，也不会留下半份文件。
+- 生成文件为 `backup_<UTC 时间>.sql`、同名 `.manifest.json`（各表行数清单）与 `backup_<UTC 时间>_uploads.tar.gz`。备份先写 `.part`，完整性校验通过后才改名；失败不会覆盖已有的有效备份，也不会留下半份文件。
 - 只备份数据库时去掉 `--with-uploads`；此时 `--check` 会提示没有上传归档（仅能恢复数据库）。
 - 数据库快照与上传归档**非同一时刻生成**（先快照后打包）：快照之后新上传的文件会进入归档但不在数据库记录中，恢复后可能产生少量孤儿文件（无害，`python tools/check_uploads.py` 可识别）。
+- 备份/恢复依赖 MySQL 客户端工具（`mysqldump`、`mysql`）。未加入 PATH 时通过 `MYSQLDUMP_PATH` / `MYSQL_CLIENT_PATH` 指定完整路径；密码通过 `MYSQL_PWD` 环境变量传递，不出现在命令行参数中。
 
-恢复必须停服务后执行（Windows 上被占用的文件无法替换；Linux 上运行中的进程会继续写入旧文件）：
+恢复必须停服务后执行（恢复会整表替换数据库，运行中的请求可能写入旧数据）：
 
 ```bash
 systemctl stop amig
 
 # 预演：只打印将执行的操作
-python tools/restore_db.py --backup backups/backup_xxx.db
+python tools/restore_db.py --backup backups/backup_xxx.sql
 
 # 正式恢复：数据库 + 图片
-python tools/restore_db.py --backup backups/backup_xxx.db --yes \
+python tools/restore_db.py --backup backups/backup_xxx.sql --yes \
     --restore-uploads --force-uploads
 
 # 复核后再启动
@@ -124,12 +125,11 @@ systemctl start amig
 
 恢复注意事项：
 
-- 恢复前会自动把当前库备份为 `backups/pre_restore_<时间>.db`；数据库替换失败或恢复后校验失败会自动回滚。
-- 替换数据库前，旧库与 `-wal/-shm` 会先改名保留而不是直接删除；替换失败时原样还原，不会丢失尚未 checkpoint 的已提交数据。
+- 恢复前会自动用 `mysqldump` 把当前库导出为 `backups/pre_restore_<时间>.sql`；导入失败或恢复后校验（行数清单、孤儿点赞）失败会自动用该副本回滚。
+- 恢复目标就是当前 `.env` 中 `MYSQL_DATABASE` 指向的库，预演时会明确打印；导入使用备份内的 `DROP TABLE` + `CREATE TABLE`，即整表替换。
 - 上传目录先解包到同盘临时目录并确认可读，再整体改名切换；旧目录保留为 `uploads.pre_restore_<时间>`、`private_uploads.pre_restore_<时间>`，确认数据无误后可人工清理。
-- 上传归档必须与备份文件同名配对；找不到配对归档时恢复会中止，不会误用其他时间点的图片。
+- 上传归档必须与备份文件同名配对；找不到配对归档时恢复会中止，不会误用其他时间点的图片。恢复后还会核对“数据库引用的图片文件是否都在归档中”，缺失会明确报告。
 - `--force-uploads` 表示允许覆盖现有上传目录（旧目录仍会保留）；不写该参数时，目标目录已存在会拒绝恢复。
-- 备份先取数据库快照再打包图片；若备份期间恰好有图片被删除，`--check` 可能报告少量缺失文件，建议在低峰期执行备份。
 - Linux 恢复后请修正属主：`chown -R www-data:www-data uploads private_uploads`。
 
 ### 后台功能（管理员，独立管理域名）
@@ -169,7 +169,7 @@ systemctl start amig
 | 语言 | Python 3.10+ |
 | Web 框架 | FastAPI |
 | 模板引擎 | Jinja2 |
-| 数据库 | SQLite（WAL 模式） |
+| 数据库 | MySQL 8.0+（InnoDB + utf8mb4，驱动 PyMySQL） |
 | 图片处理 | Pillow |
 | IP 归属地 | HTTPS 公网 API（主 `ip.zxinc.org`，回退 `ipapi.co`；带缓存、失败退避与降级） |
 | 密码哈希 | bcrypt |
@@ -186,7 +186,7 @@ systemctl start amig
   ├── 管理域名 admin.example.com ─► nginx ───────┼── app/routes/admin.py  后台路由
   │        （后台管理入口）                       └── app/routes/api.py    点赞 API
   │
-  └── 数据层：SQLite (data/app.db) + 图片文件 (uploads/，经 app/routes/media.py 鉴权访问)
+  └── 数据层：MySQL 8.0+ (amig 库) + 图片文件 (uploads/，经 app/routes/media.py 鉴权访问)
 ```
 
 **双域名架构**：通过中间件校验 `Host` 头，非管理域名的 `/admin` 请求一律伪装为 404，实现前后台物理隔离。
@@ -197,7 +197,7 @@ systemctl start amig
 |------|------|
 | `app/main.py` | 应用入口、中间件注册、静态文件挂载、异常处理 |
 | `app/config.py` | 全局配置常量与默认值 |
-| `app/database.py` | SQLite 连接、WAL、建表、自动迁移 |
+| `app/database.py` | MySQL 连接池、事务/SAVEPOINT、行对象适配、建表与结构版本初始化 |
 | `app/models.py` | 数据操作（纯 SQL 参数化查询） |
 | `app/middleware.py` | 管理域名校验、CSRF/Origin 校验、安全响应头、敏感词过滤 |
 | `app/password_policy.py` | 统一的服务端密码策略（长度、弱口令、bcrypt 字节上限） |
@@ -210,9 +210,11 @@ systemctl start amig
 | `app/upload_consistency.py` | 公开/私有上传目录与数据库一致性检查、受控孤儿文件清理 |
 | `tools/check_uploads.py` | 一致性检查命令行工具（默认只读） |
 | `tools/migrate_private_uploads.py` | 历史待审/已拒绝文件一次性迁移到私有目录（默认预演） |
-| `tools/backup_db.py` | 数据库与图片在线备份（SQLite Online Backup API，原子写入、自动校验） |
+| `tools/backup_db.py` | 数据库与图片备份（mysqldump --single-transaction，原子写入、自动校验、行数清单） |
 | `tools/restore_db.py` | 备份校验与离线恢复（恢复前安全副本、失败自动回滚、上传目录整体切换） |
-| `tools/check_db.py` | 数据库只读健康检查（WAL/busy_timeout/外键/计数漂移/备份状态） |
+| `tools/check_db.py` | 数据库只读健康检查（版本/字符集/表与索引/计数漂移/孤儿点赞/备份状态） |
+| `tools/migrate_sqlite_to_mysql.py` | 一次性迁移工具：把旧 SQLite 数据完整迁入 MySQL（只读源库、保留 ID、内容级校验） |
+| `tools/mysql_cli.py` | mysqldump / mysql 客户端定位与调用（密码经 MYSQL_PWD 传递） |
 | `tools/generate_watermark_samples.py` | 开发辅助：生成水印效果样例图到 docs/watermark_samples/（无破坏性，仅本地使用） |
 | `app/stats.py` | 统计数据、热度榜缓存 |
 
@@ -253,6 +255,25 @@ systemctl start amig
 ### 1. 环境要求（通用）
 
 - Python 3.10+（Windows 推荐 3.10–3.13 以使用预编译 Pillow 轮子）
+- **MySQL 8.0+（8.0 / 8.4 LTS 均可）**，需要先创建数据库与专用账号（见下方“MySQL 初始化”）
+
+### 1.1 MySQL 初始化
+
+以 root 登录 MySQL 后执行（密码请自行替换；**不要**让应用使用 root）：
+
+```sql
+CREATE DATABASE IF NOT EXISTS amig
+  CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS 'amig'@'127.0.0.1' IDENTIFIED BY '请替换为强密码';
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP, REFERENCES
+  ON amig.* TO 'amig'@'127.0.0.1';
+FLUSH PRIVILEGES;
+```
+
+- 应用启动时会自动建表（`CREATE TABLE IF NOT EXISTS`），无需手工导入 SQL。
+- 备份/恢复工具需要 `mysqldump`、`mysql` 客户端。Windows 默认在 `C:\Program Files\MySQL\MySQL Server 8.x\bin`；未加入 PATH 时可设置 `MYSQLDUMP_PATH` / `MYSQL_CLIENT_PATH`。
+- 生产环境建议给该账号只授予 `amig.*` 上的必要权限，不要授予全局权限。
+- 已有旧 SQLite 数据的站点，先按《SQLite → MySQL 迁移》一节执行一次迁移。
 
 ### 2. 获取代码
 
@@ -313,7 +334,18 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 |------|------|--------|
 | `ADMIN_DOMAIN` | 管理域名默认值，多个逗号分隔；**仅首次初始化或旧库迁移时写入数据库**，运行期以数据库设置为准；留空时后台仅允许本机回环访问 | 空 |
 | `HOST` / `PORT` / `WORKERS` | `run.py` 从 `.env`/环境变量读取全部三项；一键启动脚本只读取 shell 环境变量 `PORT`/`WORKERS`（不解析 `.env`）。生产环境只监听回环 | `127.0.0.1` / `8000` / `1` |
-| `DATABASE_PATH` | 数据库路径 | `data/app.db` |
+| `MYSQL_HOST` / `MYSQL_PORT` | MySQL 地址与端口 | `127.0.0.1` / `3306` |
+| `MYSQL_DATABASE` | 数据库名（启动时自动建库建表，字符集 utf8mb4） | `amig` |
+| `MYSQL_USER` / `MYSQL_PASSWORD` | 数据库账号与密码；**密码不要提交到 Git**，由部署环境注入 | `amig` / 空 |
+| `DB_TYPE` | 数据库类型，仅支持 `mysql` | `mysql` |
+| `MYSQL_POOL_SIZE` | 连接池常驻连接数 | `10` |
+| `MYSQL_POOL_MAX_OVERFLOW` | 连接池可溢出的最大连接数（总量不建议超过 MySQL `max_connections`） | `20` |
+| `MYSQL_POOL_TIMEOUT` | 取连接超时（秒），超时返回明确错误而不是无限排队 | `10` |
+| `MYSQL_PING_IDLE_SECONDS` | 连接空闲超过该秒数后，下次使用前先 ping 并自动重连 | `60` |
+| `MYSQL_QUOTA_LOCK_TIMEOUT` | 上传额度串行化（`GET_LOCK`）等待秒数 | `5` |
+| `MYSQL_CHARSET` / `MYSQL_COLLATION` | 连接字符集与排序规则 | `utf8mb4` / `utf8mb4_unicode_ci` |
+| `MYSQLDUMP_PATH` / `MYSQL_CLIENT_PATH` | 备份恢复所需的客户端完整路径（留空自动探测） | 空 |
+| `DATABASE_PATH` | 旧 SQLite 库路径，**仅供迁移工具作为默认数据源**，运行时不读取 | `data/app.db` |
 | `UPLOADS_DIR` | 公开上传目录（已审核图片与 Logo） | `uploads` |
 | `PRIVATE_UPLOADS_DIR` | 私有上传目录（待审核/已拒绝图片） | `private_uploads` |
 | `UPLOAD_MAX_CONCURRENT` | 上传接口（含 multipart 解析阶段）每进程最大并发请求数，超出返回 503 | `8` |
@@ -327,11 +359,7 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 | `SESSION_IDLE_MINUTES` | 管理员 Session 空闲超时（分钟） | `120` |
 | `LOGIN_IP_MAX_ATTEMPTS` | 同一 IP 登录失败上限（窗口内） | `5` |
 | `LOGIN_IP_WINDOW_MINUTES` | 登录失败限流窗口（分钟） | `15` |
-| `DB_BUSY_TIMEOUT_MS` | SQLite 写锁等待上限（毫秒） | `5000` |
-| `DB_SYNCHRONOUS` | WAL 持久化级别（`FULL`/`NORMAL`/`OFF`） | `FULL` |
-| `DB_WAL_AUTOCHECKPOINT_PAGES` | WAL 自动 checkpoint 阈值（页，约 4KB/页） | `1000` |
 | `DB_SLOW_QUERY_MS` | 慢查询日志阈值（毫秒，`0` 关闭） | `200` |
-| `DB_BACKUP_BEFORE_MIGRATION` | 结构迁移前自动快照 | `true` |
 | `BACKUP_DIR` | 备份目录 | `backups` |
 | `BACKUP_KEEP` | 备份保留份数 | `7` |
 | `WATERMARK_FONT_PATH` | 水印字体路径，需支持简体中文；默认使用内置 Noto Sans SC | `app/assets/fonts/NotoSansSC-Regular.otf` |
@@ -353,7 +381,7 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 |---|---|
 | 操作系统 | Linux（CentOS / Ubuntu / Debian 均可） |
 | Python | 3.10+，推荐 3.12.3（已验证） |
-| 数据库 | SQLite（无需独立安装） |
+| 数据库 | MySQL 8.0+（需独立安装，建议 8.0 或 8.4 LTS） |
 | 反向代理 | Nginx（1.18+，含 `proxy_pass` 模块） |
 | 进程管理 | systemd |
 | 网络 | 服务器可访问 HTTPS 归属地服务（仅上传和点赞时查询，带缓存与失败退避） |
@@ -364,7 +392,7 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 |---|---|---|
 | 纯源码（约 60 个文件） | ~0.25 MB | 不含 `.git` / 虚拟环境 / 数据 |
 | Python 虚拟环境 + 依赖 | ~80–120 MB | Pillow、FastAPI 及传递依赖 |
-| SQLite 数据库 | 数 KB ~ 数十 MB | 随图片记录数量增长 |
+| MySQL 数据库 | 数百 MB 起（含 InnoDB 日志与缓冲） | 随图片记录数量增长 |
 | 运行内存（4 workers 实测） | ~125 MB | 峰值约 125 MB；1 worker 约 30–40 MB |
 | 图片处理瞬时内存 | +100–200 MB | 大图缩放/转码时短暂增加 |
 
@@ -413,11 +441,11 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-`requirements.txt` 核心依赖：`fastapi`、`uvicorn`、`starlette`、`python-multipart`、`Pillow`、`bcrypt`、`aiofiles`、`Jinja2`、`httpx`。
+`requirements.txt` 核心依赖：`fastapi`、`uvicorn`、`starlette`、`python-multipart`、`Pillow`、`bcrypt`、`aiofiles`、`Jinja2`、`httpx`、`PyMySQL`、`cryptography`（MySQL 8 默认的 `caching_sha2_password` 认证需要后者）。
 
-> 运行测试（可选，使用内置 unittest，无需额外安装）：
+> 运行测试（需要可用的 MySQL；测试会自动创建 `amig_test_*` 随机库，不会影响开发库）：
 > ```bash
-> python -B -m unittest discover -s tests -t . -v
+> python -m pytest tests -q
 > ```
 
 > 若服务器为 Debian/Ubuntu 且无法创建虚拟环境，需先安装 `python3-venv`、`python3-full`；pip 安装若受 PEP 668 限制，可加 `--break-system-packages` 或直接使用系统 `python3`。
@@ -443,23 +471,32 @@ COOKIE_SECURE=true
 HOST=127.0.0.1
 PORT=8000
 WORKERS=1
+
+# 数据库（必须填写实际账号密码，请勿使用 root）
+DB_TYPE=mysql
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_DATABASE=amig
+MYSQL_USER=amig
+MYSQL_PASSWORD=替换为实际密码
 ```
 
 > 首次启动时，若数据库尚未配置 `admin_domain`，应用会把 `ADMIN_DOMAIN` 归一化后写入数据库一次；之后**数据库中的「站点设置 → 管理域名」是唯一权威配置**，`.env` 与 systemd 中的旧值不会再覆盖它。
 >
 > 如果首次启动时 `ADMIN_DOMAIN` 为空，应用**不会**写入"已初始化"标记，也不会静默放行任意域名：`/admin` 只允许本机回环访问，并在日志中输出明确警告；之后补充 `.env` 并重启仍可完成初始化。
 >
-> `WORKERS` 修改后需要重启服务。多 worker 下 Session、登录限流和图片审核均通过 SQLite 共享，不会出现登录态不一致。
+> `WORKERS` 修改后需要重启服务。多 worker 下 Session、登录限流、上传额度与图片审核均通过 MySQL 共享，不会出现登录态不一致。
 >
 > 注意：上传接口设有两层并发保护：multipart 解析与图片处理阶段的并发闸门默认**单进程 8 个**（可用 `UPLOAD_MAX_CONCURRENT` 调整），图片解码/转码为单进程内 4 个。多 worker 部署时全局上限约为两者乘以 worker 数。Worker 数较多时请评估服务器的 CPU 峰值；每日上传配额与 IP 间隔限制通过数据库原子预约校验，多 worker 一致。上传请求体大小还受应用层限制（单文件 10MB，请求体含表单字段共 11MB），Nginx 层的 `client_max_body_size 12m` 与 `client_body_timeout` 共同拦截超大/慢速请求。
 
 可选项（有默认值，通常无需修改）：
 
 ```ini
-DATABASE_PATH=data/app.db
 UPLOADS_DIR=uploads
 PRIVATE_UPLOADS_DIR=private_uploads
 BACKUP_DIR=backups
+MYSQL_POOL_SIZE=10
+MYSQL_POOL_MAX_OVERFLOW=20
 IP_API_TIMEOUT=3
 IP_API_CACHE_TTL=300
 # 可信反向代理：仅支持 IP/CIDR（不支持主机名），默认仅本机回环
@@ -534,17 +571,42 @@ source venv/bin/activate
 python init_db.py
 ```
 
-脚本会：建表 → 创建管理员 `admin` 并打印随机密码 → 写入默认配置 → 预置页面与友情链接。
+脚本会：建库建表（InnoDB + utf8mb4）→ 创建管理员 `admin` 并打印随机密码 → 写入默认配置 → 预置页面与友情链接。重复执行是幂等的，不会覆盖已有数据。
 
-> **请立即保存输出的管理员密码**。若遗忘，用 `python reset_password.py` 重置。
+> **请立即保存输出的管理员密码**。若遗忘，用 `python reset_password.py` 重置（会撤销该管理员全部旧会话）。
 
-> **数据库自动迁移**：服务启动时 `init_db()` 会自动检测并补齐以下结构，缺失则自动 `ALTER TABLE ... ADD COLUMN` 或 `CREATE TABLE IF NOT EXISTS`：
-> - `images` 表补充字段：`title`、`region`、`ip`、`ua`、`ua_hash`、`province`、`city`、`content_md5`、`status`、`reject_reason`、`admin_edited`、`reviewed_at`、`views`、`like_count`、`is_duplicate`（历史库缺失的字段自动补空值）
-> - `admin_logs` 表补充字段：`ip`、`location`（历史日志无 IP/位置信息）
-> - `sessions` 表：持久化管理员会话；第二阶段新增 `csrf_token`（会话绑定 CSRF）与 `last_seen_at`（空闲超时），旧会话的活动时间自动用 `created_at` 回填
-> - `login_rate_limits` 表：新增，用于数据库共享的登录失败限流（多 worker 生效）
+> **数据库结构初始化**：服务启动时 `init_db()` 会执行 `CREATE TABLE IF NOT EXISTS` 建齐 15 张业务表与全部索引，并在 `schema_migrations` 记录结构版本（4/5/6）。MySQL 侧不再需要逐列 `ALTER TABLE` 补列。
 >
-> 无需手工执行任何 SQL；部署后重启服务即可自动完成迁移。升级后旧管理员仍可使用原密码登录，现有会话会继续有效（缺失的 CSRF 令牌会在首次访问时自动补齐）。
+> 建表清单：`images`、`likes`、`ban_list`、`admins`、`sessions`、`login_rate_limits`、`settings`、`upload_reservations`、`pages`、`friend_links`、`daily_stats`、`admin_logs`、`view_sessions`、`cooling`、`schema_migrations`。`likes.image_id` 有真实外键指向 `images.id`（`ON DELETE CASCADE`）。
+>
+> **第三阶段图片访问升级**：已通过图片继续留在 `uploads/`；新待审/已拒绝图片写入 `private_uploads/`。升级后建议执行 `python tools/migrate_private_uploads.py --apply` 把历史待审文件移入私有目录（先不带 `--apply` 预演）。必须删除 Nginx 中旧的 `location /uploads { alias ... }` 静态配置，否则待审核图片仍可被直接访问。可用 `python tools/check_uploads.py` 检查两个目录的缺失/孤儿情况。
+
+#### SQLite → MySQL 数据迁移（从旧版本升级的站点）
+
+旧版本使用 `data/app.db`（SQLite）。升级到 MySQL 版本时执行一次迁移工具：
+
+```bash
+# 0) 先确认 MySQL 已按「1.1 MySQL 初始化」建好库与账号，并在 .env 填好 MYSQL_*
+# 1) 停止旧服务，避免迁移过程中继续写入旧库
+systemctl stop amig
+
+# 2) 迁移（默认读取 DATABASE_PATH=data/app.db，也可用 --source 指定）
+python tools/migrate_sqlite_to_mysql.py --source data/app.db
+
+# 3) 核对迁移结果后启动新版本
+python tools/check_db.py
+systemctl start amig
+```
+
+迁移工具的行为：
+
+- 以只读模式（`mode=ro`）打开 SQLite，迁移前后校验文件 SHA-256 不变，**绝不修改或删除源库**；
+- 先做 `PRAGMA integrity_check` 与迁移前各表行数统计，并提示先备份 `uploads/`、`private_uploads/`；
+- 目标库已有业务数据时拒绝执行，防止重复导入或覆盖；旧版本缺少的表会自动跳过并在报告中提示；
+- 迁移前检查字符串长度是否超出目标 `VARCHAR` 上限（旧库 TEXT 可能超长），提前报错而不是中途失败；
+- 每张表一个事务，失败时输出表名、行号与主键值，且该表整体回滚；保留原始自增 ID 并重置 `AUTO_INCREMENT`；
+- 迁移后逐表对比行数，并对全部行做逐字段内容级校验（中文、emoji、NULL、时间字符串均参与比对）；
+- 源 SQLite 文件可保留作为存档；确认新站运行正常前不要删除。
 >
 > **第三阶段图片访问升级**：已通过图片继续留在 `uploads/`；新待审/已拒绝图片写入 `private_uploads/`。升级后建议执行 `python tools/migrate_private_uploads.py --apply` 把历史待审文件移入私有目录（先不带 `--apply` 预演）。必须删除 Nginx 中旧的 `location /uploads { alias ... }` 静态配置，否则待审核图片仍可被直接访问。可用 `python tools/check_uploads.py` 检查两个目录的缺失/孤儿情况。
 
@@ -763,10 +825,10 @@ curl -sI https://example.com/ | grep -i strict-transport-security
 curl -I https://example.com/admin
 curl -I https://admin.example.com/admin/login
 # 敏感路径不可访问（应为 404）
-curl -I https://example.com/data/app.db
 curl -I https://example.com/backups/
 curl -I https://example.com/private_uploads/
 curl -I https://example.com/.env
+curl -I https://example.com/tools/backup_db.py
 # 已通过图片公开访问、待审核图片 404（替换为实际文件相对路径）
 curl -I https://example.com/uploads/2026/11/approved-example.webp
 curl -I https://example.com/uploads/2026/11/pending-example.webp
@@ -793,10 +855,10 @@ python tools/check_uploads.py
    - 旧部署如存在 `alias /www/wwwroot/amig/uploads/`，升级时必须删除；
    - 不要把项目根目录配置为 Nginx 的 `root`：`data/`（数据库）、`backups/`、`.env`、`tools/` 都可能被直接下载；示例配置已加入显式拒绝规则。
 5. **反向代理**：`proxy_set_header Host $host` 必须配置，否则后台域名隔离与 CSRF 同源校验会失效；`X-Real-IP` 与 `X-Forwarded-Proto` 只在来源属于 `TRUSTED_PROXIES` 时被信任，禁止把该配置设为 `0.0.0.0/0`。
-6. **定期备份**：使用专用工具（不要直接 `tar` 正在运行的 `.db`，WAL 内容会丢失）：
+6. **定期备份**：使用专用工具（不要在业务高峰直接复制数据目录）：
    ```bash
    python tools/backup_db.py --with-uploads
-   python tools/restore_db.py --backup backups/backup_xxx.db --check
+   python tools/restore_db.py --backup backups/backup_xxx.sql --check
    ```
    详见「数据备份与恢复」一节。
 7. **回滚**：`git revert <commit>` 后重启服务；或恢复代码备份后重启。
@@ -876,7 +938,7 @@ amig/
 ├── app/
 │   ├── main.py              # 应用入口
 │   ├── config.py            # 全局配置
-│   ├── database.py          # 数据库连接、建表与自动迁移
+│   ├── database.py          # MySQL 连接池、事务、建表与结构版本
 │   ├── models.py            # 数据模型（纯 SQL）
 │   ├── middleware.py        # 中间件（域名校验/CSRF/敏感词）
 │   ├── auth.py              # 认证与 Session
@@ -893,7 +955,7 @@ amig/
 │   └── static/              # 静态资源（CSS/JS）
 ├── uploads/                 # 已审核图片与 Logo（按年/月分目录）
 ├── private_uploads/         # 待审核/已拒绝图片（仅应用可读，Nginx 不得直接暴露）
-├── data/                    # 数据文件（app.db）
+├── data/                    # 旧 SQLite 存档与迁移工具默认数据源（运行时不再写入）
 ├── backups/                 # 备份文件（数据库快照 + 图片归档，勿提交/勿公开）
 ├── tools/                   # 运维工具（备份、恢复、健康检查、迁移、一致性检查）
 ├── tests/                   # 单元测试（unittest）
@@ -977,14 +1039,20 @@ A：第二阶段取消了全局账户锁定，失败次数只按来源 IP 限流
 **Q：代码更新后不生效？**
 A：Python 进程不会热加载，务必 `sudo systemctl restart amig.service`。
 
-**Q：如何验证数据库迁移是否成功？**
-A：服务启动时自动迁移，用下面命令核对关键结构（`PRAGMA table_info` 返回元组，字段名在第二列，用 `r[1]` 取值）：
+**Q：如何验证数据库迁移（SQLite → MySQL）是否成功？**
+A：执行只读健康检查，会输出 MySQL 版本、字符集、表与索引数量、行数、点赞计数漂移等：
 
 ```bash
-cd /www/wwwroot/amig && python3 -c "import sqlite3; c=sqlite3.connect('data/app.db'); cols={r[1] for r in c.execute('PRAGMA table_info(images)').fetchall()}; print('字段:', all(x in cols for x in ['title','region','ip','like_count','views'])); print('sessions 表:', bool(c.execute(\"SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'\").fetchone())); c.close()"
+cd /www/wwwroot/amig && python3 tools/check_db.py --deep
 ```
 
-预期输出均为 `True`，即迁移完成。
+预期输出 `[通过] 未发现问题`。迁移工具本身也会在结束时逐表对比行数并做逐字段内容级校验。
+
+**Q：启动报“无法连接 MySQL”或“连接池已耗尽”？**
+A：前者检查 `.env` 的 `MYSQL_HOST/PORT/DATABASE/USER/PASSWORD`、MySQL 是否运行、账号是否允许从该主机登录；后者说明并发超过 `MYSQL_POOL_SIZE + MYSQL_POOL_MAX_OVERFLOW`，请适度调大但仍需保证总量小于 MySQL `max_connections`。
+
+**Q：备份时报找不到 mysqldump？**
+A：安装 MySQL 客户端工具，或在 `.env` 设置 `MYSQLDUMP_PATH` / `MYSQL_CLIENT_PATH` 为可执行文件完整路径（Windows 默认在 `C:\Program Files\MySQL\MySQL Server 8.x\bin`）。
 
 ---
 
@@ -1003,7 +1071,11 @@ cd /www/wwwroot/amig && python3 -c "import sqlite3; c=sqlite3.connect('data/app.
 | `admin_logs` | 管理员操作日志（含 IP） |
 | `sessions` | 管理员会话（持久化、空闲/绝对超时、会话绑定 CSRF） |
 | `login_rate_limits` | 登录失败限流（按来源 IP，多 worker 共享） |
-| `view_sessions` | 浏览去重记录 |
+| `view_sessions` | 浏览去重记录（`(image_id, ip)` 唯一） |
 | `cooling` | 冷却机制（拒绝次数、冷却倍数） |
+| `upload_reservations` | 上传额度预约（限额检查与占用原子化） |
+| `schema_migrations` | 结构版本记录 |
 
-> 数据库文件位于 `data/app.db`，使用 SQLite，可通过 `sqlite3 data/app.db` 或图形化工具（如 DB Browser for SQLite）查看。
+> 全部表为 InnoDB + `utf8mb4` / `utf8mb4_unicode_ci`；主键 `INT AUTO_INCREMENT`（`sessions` 用 `VARCHAR(64)` 会话 ID 作主键）；`likes` 对 `images` 有真实外键级联删除。时间字段沿用 ISO 8601 字符串（`VARCHAR(40)`），保证与历史数据格式一致。
+
+> 数据库为 MySQL 8.0+（库名 `amig`，InnoDB + utf8mb4）。可用 `mysql -u amig -p amig` 或任意 MySQL 客户端查看数据；旧 SQLite 文件仅作迁移存档保留在 `data/app.db`。

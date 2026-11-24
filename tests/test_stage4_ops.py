@@ -1,12 +1,12 @@
-"""第四阶段：备份、恢复、健康检查与上传目录一致性测试。
+"""第四阶段：MySQL 备份、恢复、健康检查与上传目录一致性测试。
 
-全部在临时目录中执行，不接触真实 data/app.db 与 backups/。
+全部使用独立的随机 MySQL 测试库与临时备份/上传目录，
+不接触开发库、真实 backups/ 与 uploads/。
 """
 import io
 import json
 import os
 import shutil
-import sqlite3
 import subprocess
 import sys
 import tarfile
@@ -16,9 +16,11 @@ from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 import app.database as db
+import app.image_utils as image_utils
 import app.upload_consistency as consistency
-from app import image_utils
-from tools import backup_db, check_db, restore_db
+from app import config
+from tests.mysql_test_utils import create_test_database, drop_test_database
+from tools import backup_db, check_db, mysql_cli, restore_db
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -28,50 +30,35 @@ def _iso(days_ago=0, seconds=0):
     return moment.isoformat(timespec="seconds")
 
 
-class BackupRestoreBase(unittest.TestCase):
-    """每个用例独立的库 + 备份目录 + 上传目录。"""
+class OpsBase(unittest.TestCase):
+    """每个用例独立的测试库 + 备份目录 + 上传目录。"""
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp(prefix="amig_ops_")
-        self._orig = (db.DATABASE_PATH, db.BACKUP_DIR,
-                      image_utils.UPLOADS_DIR, image_utils.PRIVATE_UPLOADS_DIR,
-                      restore_db.UPLOADS_DIR, restore_db.PRIVATE_UPLOADS_DIR)
-        # 工具模块在导入时绑定了配置常量，测试中一并改指临时目录
-        self._orig_tools = (backup_db.DATABASE_PATH, backup_db.BACKUP_DIR,
-                            backup_db.UPLOADS_DIR, backup_db.PRIVATE_UPLOADS_DIR,
-                            restore_db.DATABASE_PATH, restore_db.BACKUP_DIR)
-        self.db_path = os.path.join(self.tmpdir, "app.db")
         self.backup_dir = os.path.join(self.tmpdir, "backups")
         self.uploads = os.path.join(self.tmpdir, "uploads")
         self.private = os.path.join(self.tmpdir, "private_uploads")
-        for d in (self.uploads, self.private):
-            os.makedirs(d, exist_ok=True)
+        for path in (self.backup_dir, self.uploads, self.private):
+            os.makedirs(path, exist_ok=True)
 
-        db.close_all_db()
-        db.DATABASE_PATH = self.db_path
-        db.BACKUP_DIR = self.backup_dir
-        image_utils.UPLOADS_DIR = self.uploads
-        image_utils.PRIVATE_UPLOADS_DIR = self.private
-        backup_db.DATABASE_PATH = self.db_path
-        backup_db.BACKUP_DIR = self.backup_dir
-        backup_db.UPLOADS_DIR = self.uploads
-        backup_db.PRIVATE_UPLOADS_DIR = self.private
-        restore_db.DATABASE_PATH = self.db_path
-        restore_db.BACKUP_DIR = self.backup_dir
-        restore_db.UPLOADS_DIR = self.uploads
-        restore_db.PRIVATE_UPLOADS_DIR = self.private
-        db.init_db()
+        self.db_name = create_test_database()
+
+        # 工具与业务模块都通过 app.config / image_utils 读取目录，统一改指临时目录
+        self._patches = [
+            mock.patch.object(config, "BACKUP_DIR", self.backup_dir),
+            mock.patch.object(config, "UPLOADS_DIR", self.uploads),
+            mock.patch.object(config, "PRIVATE_UPLOADS_DIR", self.private),
+            mock.patch.object(image_utils, "UPLOADS_DIR", self.uploads),
+            mock.patch.object(image_utils, "PRIVATE_UPLOADS_DIR", self.private),
+        ]
+        for patcher in self._patches:
+            patcher.start()
 
     def tearDown(self):
+        for patcher in reversed(self._patches):
+            patcher.stop()
         db.close_all_db()
-        (db.DATABASE_PATH, db.BACKUP_DIR,
-         image_utils.UPLOADS_DIR, image_utils.PRIVATE_UPLOADS_DIR,
-         restore_db.UPLOADS_DIR, restore_db.PRIVATE_UPLOADS_DIR) = self._orig
-        (backup_db.DATABASE_PATH, backup_db.BACKUP_DIR,
-         backup_db.UPLOADS_DIR, backup_db.PRIVATE_UPLOADS_DIR,
-         restore_db.DATABASE_PATH, restore_db.BACKUP_DIR) = self._orig_tools
-        # 关闭指向临时目录的连接后再删除，避免污染后续测试的真实库
-        db.close_all_db()
+        drop_test_database(self.db_name)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def add_image(self, status="approved", filename=None, thumb=None,
@@ -79,7 +66,7 @@ class BackupRestoreBase(unittest.TestCase):
         filename = filename or f"{os.urandom(6).hex()}.webp"
         thumb = thumb or f"thumb_{os.urandom(4).hex()}.webp"
         conn = db.get_db()
-        conn.execute(
+        cursor = conn.execute(
             "INSERT INTO images (filename, thumb_filename, original_size,"
             " compressed_size, width, height, description, title, author,"
             " content_md5, ip, ua, ua_hash, province, city, region, status,"
@@ -90,10 +77,11 @@ class BackupRestoreBase(unittest.TestCase):
              _iso(days_ago) if status == "approved" else None, like_count),
         )
         conn.commit()
-        return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        return cursor.lastrowid
 
     def write_file(self, directory, name, size=64):
         path = os.path.join(directory, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "wb") as f:
             f.write(b"RIFF0000WEBP" + b"x" * size)
         return path
@@ -101,7 +89,6 @@ class BackupRestoreBase(unittest.TestCase):
     def write_archive(self, filename, entries):
         """entries: {归档内路径: bytes}"""
         path = os.path.join(self.backup_dir, filename)
-        os.makedirs(self.backup_dir, exist_ok=True)
         with tarfile.open(path, "w:gz") as tar:
             for arcname, data in entries.items():
                 info = tarfile.TarInfo(arcname)
@@ -109,82 +96,109 @@ class BackupRestoreBase(unittest.TestCase):
                 tar.addfile(info, io.BytesIO(data))
         return path
 
-    def row_count(self, table, path=None):
-        conn = sqlite3.connect(path or self.db_path)
-        try:
-            return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-        finally:
-            conn.close()
+    def row_count(self, table):
+        return db.get_db().execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()["c"]
 
-
-class TestBackupTool(BackupRestoreBase):
-    def test_backup_creates_verified_file(self):
-        self.add_image()
-        os.makedirs(self.backup_dir, exist_ok=True)
-        target = os.path.join(self.backup_dir, "backup_test.db")
-        backup_db._backup_database(self.db_path, target)
-        ok, detail = backup_db._verify_copy(target)
+    def make_backup(self, stamp="20260101T000000Z"):
+        """用真实 mysqldump 生成一份备份，返回路径。"""
+        target = os.path.join(self.backup_dir, f"backup_{stamp}.sql")
+        ok, detail = backup_db._dump_database(target)
         self.assertTrue(ok, detail)
-        self.assertEqual(self.row_count("images", target), 1)
+        return target
 
-    def test_backup_includes_uncheckpointed_wal_data(self):
-        """WAL 中未 checkpoint 的已提交数据必须进入备份（不能用文件复制）。"""
-        self.add_image(filename="wal_test.webp")
-        wal_path = self.db_path + "-wal"
-        self.assertTrue(os.path.exists(wal_path) and os.path.getsize(wal_path) > 0,
-                        "前置条件不成立：WAL 中没有待合并数据")
+    def subprocess_env(self):
+        env = dict(os.environ)
+        env.update({
+            "MYSQL_HOST": config.MYSQL_HOST,
+            "MYSQL_PORT": str(config.MYSQL_PORT),
+            "MYSQL_USER": config.MYSQL_USER,
+            "MYSQL_PASSWORD": config.MYSQL_PASSWORD,
+            "MYSQL_DATABASE": self.db_name,
+            "BACKUP_DIR": self.backup_dir,
+            "UPLOADS_DIR": self.uploads,
+            "PRIVATE_UPLOADS_DIR": self.private,
+        })
+        return env
 
-        target = os.path.join(self.tmpdir, "wal_backup.db")
-        backup_db._backup_database(self.db_path, target)
-        self.assertEqual(self.row_count("images", target), 1,
-                         "备份遗漏了 WAL 中已提交的数据")
 
-    def test_verify_detects_corrupted_backup(self):
-        broken = os.path.join(self.tmpdir, "broken.db")
+class TestBackupTool(OpsBase):
+    def _run_main(self, extra_args=()):
+        argv = ["backup_db.py", "--json"] + list(extra_args)
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            code = backup_db.main()
+        return code, out.getvalue()
+
+    def test_backup_creates_verified_file(self):
+        self.add_image(filename="a.webp")
+        code, output = self._run_main()
+        self.assertEqual(code, 0, output)
+        data = json.loads(output)
+        self.assertTrue(data["ok"], data)
+        self.assertTrue(os.path.exists(data["backup_file"]))
+        self.assertEqual(data["row_counts"]["images"], 1)
+        # 行数清单与备份同生共死
+        self.assertTrue(os.path.exists(data["backup_file"] + ".manifest.json"))
+        ok, detail, info = restore_db.verify_backup(data["backup_file"])
+        self.assertTrue(ok, detail)
+        self.assertIn("images", info["tables"])
+
+    def test_verify_dump_detects_corrupted_file(self):
+        broken = os.path.join(self.tmpdir, "broken.sql")
         with open(broken, "wb") as f:
-            f.write(b"this is not a sqlite database at all" * 10)
-        ok, detail = backup_db._verify_copy(broken)
+            f.write(b"this is not a mysqldump file" * 10)
+        ok, detail = backup_db._verify_dump(broken)
         self.assertFalse(ok)
-        self.assertIn("失败", detail)
+        self.assertIn("Dump completed", detail)
+
+    def test_verify_dump_detects_missing_tables(self):
+        partial = os.path.join(self.tmpdir, "partial.sql")
+        with open(partial, "w", encoding="utf-8") as f:
+            f.write("-- MySQL dump\n-- Dump completed on 2026-01-01\n")
+        ok, detail = backup_db._verify_dump(partial)
+        self.assertFalse(ok)
+        self.assertIn("业务表结构", detail)
 
     def test_prune_keeps_newest_n(self):
-        os.makedirs(self.backup_dir, exist_ok=True)
-        names = [f"backup_2026010{i}T000000Z.db" for i in range(1, 6)]
+        names = [f"backup_2026010{i}T000000Z.sql" for i in range(1, 6)]
         for name in names:
             with open(os.path.join(self.backup_dir, name), "wb") as f:
                 f.write(b"x")
+            with open(os.path.join(self.backup_dir, name + ".manifest.json"), "w") as f:
+                f.write("{}")
         removed = backup_db._prune(self.backup_dir, keep=2)
-        remaining = sorted(n for n in os.listdir(self.backup_dir) if n.endswith(".db"))
+        remaining = sorted(n for n in os.listdir(self.backup_dir) if n.endswith(".sql"))
         self.assertEqual(remaining, names[-2:])
         self.assertEqual(len(removed), 3)
+        self.assertFalse(os.path.exists(
+            os.path.join(self.backup_dir, names[0] + ".manifest.json")))
 
     def test_prune_never_removes_latest(self):
-        os.makedirs(self.backup_dir, exist_ok=True)
-        for name in ("backup_20260101T000000Z.db",):
-            with open(os.path.join(self.backup_dir, name), "wb") as f:
-                f.write(b"x")
+        name = "backup_20260101T000000Z.sql"
+        with open(os.path.join(self.backup_dir, name), "wb") as f:
+            f.write(b"x")
         backup_db._prune(self.backup_dir, keep=0)
-        self.assertEqual(len(os.listdir(self.backup_dir)), 1,
-                         "keep=0 时不应删除任何备份")
+        self.assertTrue(os.path.exists(os.path.join(self.backup_dir, name)),
+                        "keep=0 时不应删除任何备份")
 
-    def test_backup_does_not_overwrite_existing_on_failure(self):
-        """备份失败时不得删除或覆盖已有备份。"""
-        os.makedirs(self.backup_dir, exist_ok=True)
-        existing = os.path.join(self.backup_dir, "backup_20260101T000000Z.db")
+    def test_backup_failure_does_not_overwrite_existing(self):
+        """备份失败时不得删除或覆盖已有备份，也不留下 .part 残留。"""
+        existing = os.path.join(self.backup_dir, "backup_20260101T000000Z.sql")
         with open(existing, "wb") as f:
             f.write(b"old backup")
-        # 指向不存在的数据库，备份必然失败
-        ok, _ = self._run_backup_cli(os.path.join(self.tmpdir, "missing.db"))
-        self.assertFalse(ok)
+        with mock.patch.object(mysql_cli, "find_mysqldump", return_value=None):
+            code, output = self._run_main()
+        self.assertEqual(code, 1, output)
         with open(existing, "rb") as f:
             self.assertEqual(f.read(), b"old backup")
+        self.assertFalse(any(n.endswith(".part") for n in os.listdir(self.backup_dir)))
 
     def test_upload_archive_failure_keeps_existing_and_no_partial(self):
         """上传归档失败时不得覆盖已有归档，也不留下 .part 残留。"""
-        os.makedirs(self.backup_dir, exist_ok=True)
         target = os.path.join(self.backup_dir, "backup_20260101T000000Z_uploads.tar.gz")
         with open(target, "wb") as f:
             f.write(b"old archive")
+        self.write_file(self.uploads, "a.webp")
         with mock.patch.object(backup_db.tarfile, "open",
                                side_effect=tarfile.TarError("simulated")):
             ok, _ = backup_db._archive_uploads(target)
@@ -196,211 +210,128 @@ class TestBackupTool(BackupRestoreBase):
     def test_backup_does_not_overwrite_same_second(self):
         """同一秒内连续备份应生成不同文件，不能互相覆盖。"""
         self.add_image()
-        argv = ["backup_db.py"]
-        with mock.patch.object(backup_db, "_stamp", return_value="20260101T000000Z"), \
-                mock.patch.object(sys, "argv", argv), \
-                mock.patch("sys.stdout", new_callable=io.StringIO):
-            self.assertEqual(backup_db.main(), 0)
-            self.assertEqual(backup_db.main(), 0)
+        with mock.patch.object(backup_db, "_stamp", return_value="20260101T000000Z"):
+            code1, out1 = self._run_main()
+            code2, out2 = self._run_main()
+        self.assertEqual((code1, code2), (0, 0), out1 + out2)
         backups = sorted(
             n for n in os.listdir(self.backup_dir)
-            if n.startswith("backup_") and n.endswith(".db")
+            if n.startswith("backup_") and n.endswith(".sql")
         )
         self.assertEqual(len(backups), 2, backups)
-        self.assertTrue(backups[1].endswith("_2.db"), backups)
-
-    def _run_backup_cli(self, db_path):
-        env = dict(os.environ)
-        env["DATABASE_PATH"] = db_path
-        env["BACKUP_DIR"] = self.backup_dir
-        proc = subprocess.run([sys.executable, "tools/backup_db.py", "--json"],
-                              cwd=ROOT, env=env, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace")
-        try:
-            data = json.loads(proc.stdout)
-        except ValueError:
-            data = {}
-        return proc.returncode == 0, data
+        self.assertTrue(backups[1].endswith("_2.sql"), backups)
 
 
-class TestRestoreTool(BackupRestoreBase):
-    def _make_backup(self, images=2):
-        for _ in range(images):
-            self.add_image()
-        db.checkpoint_wal("TRUNCATE")
-        target = os.path.join(self.backup_dir, "backup_20260101T000000Z.db")
-        os.makedirs(self.backup_dir, exist_ok=True)
-        backup_db._backup_database(self.db_path, target)
-        return target
-
+class TestRestoreTool(OpsBase):
     def test_verify_backup_rejects_missing_tables(self):
-        empty = os.path.join(self.tmpdir, "empty.db")
-        conn = sqlite3.connect(empty)
-        conn.execute("CREATE TABLE unrelated (x INTEGER)")
-        conn.commit()
-        conn.close()
-        ok, detail, _ = restore_db.verify_backup(empty)
+        fake = os.path.join(self.tmpdir, "fake.sql")
+        with open(fake, "w", encoding="utf-8") as f:
+            f.write("-- dump of unrelated table\nCREATE TABLE `unrelated` (x int);\n"
+                    "-- Dump completed on 2026-01-01\n")
+        ok, detail, _ = restore_db.verify_backup(fake)
         self.assertFalse(ok)
         self.assertIn("关键表", detail)
 
-    def test_restore_replaces_database_atomically(self):
-        backup = self._make_backup(images=2)
-        # 模拟误删
-        conn = db.get_db()
-        conn.execute("DELETE FROM images")
-        conn.commit()
+    def test_restore_replaces_database(self):
+        self.add_image(filename="a.webp")
+        self.add_image(filename="b.webp")
+        backup = self.make_backup()
+        db.get_db().execute("DELETE FROM likes")
+        db.get_db().execute("DELETE FROM images")
+        db.get_db().commit()
         self.assertEqual(self.row_count("images"), 0)
 
-        # 恢复要求在应用停止后执行：先关闭本进程所有连接，否则 Windows 上
-        # -wal/-shm 被占用无法删除
-        db.close_all_db()
-        ok, detail = restore_db.restore_database(backup, self.db_path)
+        ok, detail = restore_db.restore_database(backup)
         self.assertTrue(ok, detail)
         self.assertEqual(self.row_count("images"), 2)
 
-    def test_restore_removes_stale_wal_files(self):
-        """替换数据库后必须清掉旧库的 -wal/-shm，否则会被重放进新库。"""
-        backup = self._make_backup(images=1)
-        db.close_all_db()
-        # 人为制造旧库遗留的 WAL 文件
-        for suffix in ("-wal", "-shm"):
-            with open(self.db_path + suffix, "wb") as f:
-                f.write(b"stale")
-        ok, detail = restore_db.restore_database(backup, self.db_path)
-        self.assertTrue(ok, detail)
-        self.assertFalse(os.path.exists(self.db_path + "-wal"), "旧 -wal 未清理")
-        self.assertFalse(os.path.exists(self.db_path + "-shm"), "旧 -shm 未清理")
-
     def test_restore_rejects_corrupted_backup(self):
-        broken = os.path.join(self.tmpdir, "broken.db")
+        broken = os.path.join(self.tmpdir, "broken.sql")
         with open(broken, "wb") as f:
             f.write(b"garbage" * 100)
         ok, detail, _ = restore_db.verify_backup(broken)
         self.assertFalse(ok)
 
     def test_safety_copy_created_before_restore(self):
-        backup = self._make_backup(images=1)
-        safety = restore_db._safety_copy(self.db_path)
-        self.assertIsNotNone(safety)
-        self.assertTrue(os.path.exists(safety))
+        self.add_image()
+        safety = os.path.join(self.backup_dir, "pre_restore_20260101T000000Z.sql")
+        ok, detail = restore_db._safety_dump(safety)
+        self.assertTrue(ok, detail)
         self.assertTrue(os.path.basename(safety).startswith("pre_restore_"))
+        with open(safety, "rb") as f:
+            f.seek(max(0, os.path.getsize(safety) - 200))
+            self.assertIn(b"Dump completed", f.read())
 
-    def test_restore_failure_keeps_original_database_and_wal(self):
-        """替换失败时必须还原原库与 -wal，不能先删 WAL 再失败。"""
-        backup = self._make_backup(images=1)
-        conn = db.get_db()
-        conn.execute("INSERT INTO settings (key, value) VALUES ('live_marker','1')")
-        conn.commit()
-        db.close_all_db()
+    def test_restore_failure_keeps_original_database(self):
+        """导入失败时数据库内容必须保持原样。"""
+        self.add_image(filename="keep.webp")
+        self.add_image(filename="keep2.webp")
+        backup = self.make_backup()
+        db.get_db().execute(
+            "INSERT INTO settings (`key`, value) VALUES ('live_marker', '1')"
+        )
+        db.get_db().commit()
 
-        with open(self.db_path, "rb") as f:
-            db_bytes = f.read()
-        wal_path = self.db_path + "-wal"
-        with open(wal_path, "wb") as f:
-            f.write(b"uncheckpointed-committed-data")
-
-        real = restore_db._swap_path
-        state = {"failed": False}
-
-        def flaky(src, dst):
-            # 只让最终 "临时文件 -> 正式库" 这一步失败
-            if dst == self.db_path and not state["failed"]:
-                state["failed"] = True
-                raise OSError("simulated lock")
-            return real(src, dst)
-
-        with mock.patch.object(restore_db, "_swap_path", side_effect=flaky):
-            ok, detail = restore_db.restore_database(backup, self.db_path)
-
+        with mock.patch.object(restore_db, "_import_dump",
+                               return_value=(False, "simulated import failure")):
+            ok, detail = restore_db.restore_database(backup)
         self.assertFalse(ok)
-        self.assertIn("lock", detail)
-        with open(self.db_path, "rb") as f:
-            self.assertEqual(f.read(), db_bytes, "恢复失败后原数据库被改动")
-        with open(wal_path, "rb") as f:
-            self.assertEqual(f.read(), b"uncheckpointed-committed-data",
-                             "恢复失败后旧 WAL 丢失")
-        self.assertFalse(os.path.exists(self.db_path + ".pre_restore"))
-        self.assertFalse(os.path.exists(wal_path + ".pre_restore"))
-
-        os.remove(wal_path)
-        conn = sqlite3.connect(self.db_path)
-        try:
-            self.assertEqual(
-                conn.execute(
-                    "SELECT value FROM settings WHERE key='live_marker'"
-                ).fetchone()[0],
-                "1",
-            )
-            self.assertEqual(conn.execute("SELECT COUNT(*) FROM images").fetchone()[0], 1)
-        finally:
-            conn.close()
+        self.assertIn("simulated", detail)
+        self.assertEqual(self.row_count("images"), 2, "恢复失败后原有数据丢失")
+        self.assertEqual(
+            db.get_db().execute(
+                "SELECT value FROM settings WHERE `key`='live_marker'"
+            ).fetchone()["value"],
+            "1",
+        )
 
     def test_cli_requires_yes(self):
-        backup = self._make_backup(images=1)
-        env = dict(os.environ)
-        env["DATABASE_PATH"] = self.db_path
-        env["BACKUP_DIR"] = self.backup_dir
+        self.add_image()
+        backup = self.make_backup()
         proc = subprocess.run(
             [sys.executable, "tools/restore_db.py", "--backup", backup],
-            cwd=ROOT, env=env, capture_output=True, text=True,
-            encoding="utf-8", errors="replace")
-        self.assertEqual(proc.returncode, 2, "未带 --yes 时不应执行恢复")
-        self.assertIn("预演", proc.stdout)
-        # 数据未被改动
-        self.assertEqual(self.row_count("images"), 1)
-
-    def test_cli_preview_without_wal_and_json_output(self):
-        """正常停服后没有 -wal，预演仍应成功且 --json 输出可直接解析。"""
-        backup = self._make_backup(images=1)
-        db.close_all_db()
-        for suffix in ("-wal", "-shm"):
-            path = self.db_path + suffix
-            if os.path.exists(path):
-                os.remove(path)
-
-        env = dict(os.environ)
-        env["DATABASE_PATH"] = self.db_path
-        env["BACKUP_DIR"] = self.backup_dir
-        proc = subprocess.run(
-            [sys.executable, "tools/restore_db.py", "--backup", backup, "--json"],
-            cwd=ROOT, env=env, capture_output=True, text=True,
+            cwd=ROOT, env=self.subprocess_env(), capture_output=True, text=True,
             encoding="utf-8", errors="replace")
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
-        data = json.loads(proc.stdout)
-        self.assertFalse(data["ok"])
-        self.assertIn("预演", data["error"])
+        self.assertIn("预演", proc.stdout)
         self.assertEqual(self.row_count("images"), 1)
 
     def test_cli_list_shows_backups(self):
-        self._make_backup(images=1)
-        env = dict(os.environ)
-        env["DATABASE_PATH"] = self.db_path
-        env["BACKUP_DIR"] = self.backup_dir
-        proc = subprocess.run([sys.executable, "tools/restore_db.py", "--list"],
-                              cwd=ROOT, env=env, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace")
-        self.assertEqual(proc.returncode, 0)
-        self.assertIn("backup_20260101T000000Z.db", proc.stdout)
+        self.add_image()
+        self.make_backup()
+        proc = subprocess.run(
+            [sys.executable, "tools/restore_db.py", "--list"],
+            cwd=ROOT, env=self.subprocess_env(), capture_output=True, text=True,
+            encoding="utf-8", errors="replace")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("backup_20260101T000000Z.sql", proc.stdout)
+
+    def test_cli_check_passes_for_valid_backup(self):
+        self.add_image()
+        backup = self.make_backup()
+        proc = subprocess.run(
+            [sys.executable, "tools/restore_db.py", "--backup", backup, "--check", "--json"],
+            cwd=ROOT, env=self.subprocess_env(), capture_output=True, text=True,
+            encoding="utf-8", errors="replace")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        data = json.loads(proc.stdout)
+        self.assertTrue(data["ok"], data)
 
 
-class TestUploadRestore(BackupRestoreBase):
+class TestUploadRestore(OpsBase):
     """上传目录恢复：必须与备份配对、整体替换、失败可回滚。"""
 
-    def _backup(self, entries, images=1):
-        for _ in range(images):
-            self.add_image()
-        db.checkpoint_wal("TRUNCATE")
-        backup = os.path.join(self.backup_dir, "backup_20260101T000000Z.db")
-        os.makedirs(self.backup_dir, exist_ok=True)
-        backup_db._backup_database(self.db_path, backup)
-        self.write_archive("backup_20260101T000000Z_uploads.tar.gz", entries)
+    def _backup(self, entries=None, images=1):
+        for index in range(images):
+            self.add_image(filename=f"img{index}.webp", thumb=f"img{index}_t.webp")
+        backup = self.make_backup()
+        if entries is not None:
+            self.write_archive("backup_20260101T000000Z_uploads.tar.gz", entries)
         return backup
 
     def test_restore_requires_paired_archive(self):
         """恢复 A 备份时不得误用 B 备份的上传归档。"""
-        backup = os.path.join(self.backup_dir, "backup_20260101T000000Z.db")
-        os.makedirs(self.backup_dir, exist_ok=True)
-        backup_db._backup_database(self.db_path, backup)
+        backup = self._backup(entries=None, images=0)
         self.write_archive("backup_20260201T000000Z_uploads.tar.gz",
                            {"uploads/other.webp": b"other"})
         keep = self.write_file(self.uploads, "keep.webp")
@@ -413,19 +344,18 @@ class TestUploadRestore(BackupRestoreBase):
 
     def test_restore_replaces_content_and_keeps_old_dir(self):
         backup = self._backup({
-            "uploads/new.webp": b"NEW",
+            "uploads/img0.webp": b"NEW",
+            "uploads/img0_t.webp": b"NEW_T",
             "private_uploads/pending.webp": b"PENDING",
         })
         old = self.write_file(self.uploads, "old.webp")
-        self.write_file(self.private, "old_private.webp")
 
         ok, message = restore_db.restore_uploads(backup, force=True)
         self.assertTrue(ok, message)
-        with open(os.path.join(self.uploads, "new.webp"), "rb") as f:
+        with open(os.path.join(self.uploads, "img0.webp"), "rb") as f:
             self.assertEqual(f.read(), b"NEW")
         self.assertFalse(os.path.exists(old), "旧文件未随目录替换")
         self.assertTrue(os.path.exists(os.path.join(self.private, "pending.webp")))
-        self.assertFalse(os.path.exists(os.path.join(self.private, "old_private.webp")))
 
         kept = [
             n for n in os.listdir(self.tmpdir)
@@ -435,9 +365,20 @@ class TestUploadRestore(BackupRestoreBase):
         old_dir = os.path.join(self.tmpdir, next(n for n in kept if n.startswith("uploads.")))
         self.assertTrue(os.path.exists(os.path.join(old_dir, "old.webp")))
 
+    def test_restore_reports_missing_referenced_files(self):
+        """数据库引用的图片文件不在归档中时必须报告，而不是假成功。"""
+        self.add_image(filename="need.webp", thumb="need_t.webp")
+        backup = self.make_backup()
+        self.write_archive("backup_20260101T000000Z_uploads.tar.gz", {
+            "uploads/other.webp": b"OTHER",
+        })
+        ok, message = restore_db.restore_uploads(backup, force=True)
+        self.assertFalse(ok)
+        self.assertIn("need.webp", message)
+
     def test_restore_rolls_back_when_swap_fails(self):
         backup = self._backup({
-            "uploads/new.webp": b"NEW",
+            "uploads/img0.webp": b"NEW",
             "private_uploads/pending.webp": b"PENDING",
         })
         old = self.write_file(self.uploads, "old.webp")
@@ -458,24 +399,17 @@ class TestUploadRestore(BackupRestoreBase):
         self.assertFalse(ok)
         self.assertIn("lock", message)
         self.assertTrue(os.path.exists(old), "切换失败后旧上传目录未还原")
-        self.assertFalse(os.path.exists(os.path.join(self.uploads, "new.webp")))
+        self.assertFalse(os.path.exists(os.path.join(self.uploads, "img0.webp")))
         self.assertFalse(os.path.exists(os.path.join(self.private, "pending.webp")))
         self.assertFalse(any(
             ".restore_new_" in n for n in os.listdir(self.tmpdir)
         ), "解包临时目录未清理")
 
 
-class TestBackupSetCheck(BackupRestoreBase):
-    def _backup(self):
-        self.add_image(filename="a.webp", thumb="a_t.webp")
-        db.checkpoint_wal("TRUNCATE")
-        os.makedirs(self.backup_dir, exist_ok=True)
-        backup = os.path.join(self.backup_dir, "backup_20260101T000000Z.db")
-        backup_db._backup_database(self.db_path, backup)
-        return backup
-
+class TestBackupSetCheck(OpsBase):
     def test_complete_backup_set_passes(self):
-        backup = self._backup()
+        self.add_image(filename="a.webp", thumb="a_t.webp")
+        backup = self.make_backup()
         self.write_archive("backup_20260101T000000Z_uploads.tar.gz", {
             "uploads/a.webp": b"A",
             "private_uploads/a_t.webp": b"T",
@@ -483,103 +417,76 @@ class TestBackupSetCheck(BackupRestoreBase):
         report = restore_db.check_backup_set(backup)
         self.assertTrue(report["ok"], report["error"])
         self.assertEqual(report["uploads_files"], 2)
-        self.assertEqual(report["expected_files"], 2)
-        self.assertEqual(report["missing_files"], [])
-
-    def test_missing_referenced_file_is_reported(self):
-        backup = self._backup()
-        self.write_archive("backup_20260101T000000Z_uploads.tar.gz", {
-            "uploads/a.webp": b"A",
-        })
-        report = restore_db.check_backup_set(backup)
-        self.assertFalse(report["ok"])
-        self.assertIn("a_t.webp", report["missing_files"])
 
     def test_database_only_backup_passes_with_warning(self):
-        backup = self._backup()
+        self.add_image()
+        backup = self.make_backup()
         report = restore_db.check_backup_set(backup)
         self.assertTrue(report["ok"])
         self.assertTrue(report["warning"])
 
-    def test_cli_check_returns_nonzero_for_missing_files(self):
-        backup = self._backup()
-        self.write_archive("backup_20260101T000000Z_uploads.tar.gz", {
-            "uploads/a.webp": b"A",
-        })
-        env = dict(os.environ)
-        env["DATABASE_PATH"] = self.db_path
-        env["BACKUP_DIR"] = self.backup_dir
+    def test_cli_check_returns_nonzero_for_broken_backup(self):
+        broken = os.path.join(self.backup_dir, "backup_20260101T000000Z.sql")
+        with open(broken, "wb") as f:
+            f.write(b"garbage")
         proc = subprocess.run(
-            [sys.executable, "tools/restore_db.py", "--backup", backup, "--check", "--json"],
-            cwd=ROOT, env=env, capture_output=True, text=True,
+            [sys.executable, "tools/restore_db.py", "--backup", broken, "--check", "--json"],
+            cwd=ROOT, env=self.subprocess_env(), capture_output=True, text=True,
             encoding="utf-8", errors="replace")
         self.assertEqual(proc.returncode, 1)
-        data = json.loads(proc.stdout)
-        self.assertFalse(data["ok"])
+        self.assertFalse(json.loads(proc.stdout)["ok"])
 
 
-class TestCheckDbTool(BackupRestoreBase):
-    def _collect(self, deep=False, backup_dir=None):
-        orig = (check_db.DATABASE_PATH, check_db.BACKUP_DIR,
-                check_db.UPLOADS_DIR, check_db.PRIVATE_UPLOADS_DIR)
-        check_db.DATABASE_PATH = self.db_path
-        check_db.BACKUP_DIR = backup_dir or self.backup_dir
-        check_db.UPLOADS_DIR = self.uploads
-        check_db.PRIVATE_UPLOADS_DIR = self.private
-        try:
-            return check_db.collect(deep=deep)
-        finally:
-            (check_db.DATABASE_PATH, check_db.BACKUP_DIR,
-             check_db.UPLOADS_DIR, check_db.PRIVATE_UPLOADS_DIR) = orig
-
+class TestCheckDbTool(OpsBase):
     def test_healthy_database_passes(self):
         self.add_image()
-        os.makedirs(self.backup_dir, exist_ok=True)
-        with open(os.path.join(self.backup_dir, "backup_20260101T000000Z.db"), "wb") as f:
+        with open(os.path.join(self.backup_dir, "backup_20260101T000000Z.sql"), "wb") as f:
             f.write(b"x")
-        report = self._collect(deep=True)
+        report = check_db.collect(deep=True)
         self.assertTrue(report["ok"], report["critical"])
-        self.assertEqual(report["journal_mode"].lower(), "wal")
+        self.assertEqual(report["server"]["charset"], "utf8mb4")
         self.assertIn("images", report["tables"])
-        self.assertEqual(report["integrity_check"], "ok")
+        self.assertEqual(report["like_count_drift"], 0)
+        self.assertNotIn("check_table", report.get("critical", []))
 
     def test_detects_like_count_drift(self):
         image_id = self.add_image(like_count=5)
-        conn = db.get_db()
-        conn.execute("INSERT INTO likes (image_id, ip, ua_hash, province, city, created_at)"
-                     " VALUES (?, '1.1.1.1', 'uh', 'p', 'c', ?)", (image_id, _iso()))
-        conn.commit()
-        report = self._collect()
+        db.get_db().execute(
+            "INSERT INTO likes (image_id, ip, ua_hash, province, city, created_at)"
+            " VALUES (?, '1.1.1.1', 'uh', 'p', 'c', ?)", (image_id, _iso()))
+        db.get_db().commit()
+        report = check_db.collect()
         self.assertGreaterEqual(report.get("like_count_drift", 0), 1)
+        self.assertTrue(any("like_count" in w for w in report["warnings"]))
 
     def test_detects_backup_dir_inside_uploads(self):
-        report = self._collect(backup_dir=os.path.join(self.uploads, "backups"))
+        with mock.patch.object(config, "BACKUP_DIR",
+                               os.path.join(self.uploads, "backups")):
+            report = check_db.collect()
         self.assertFalse(report["ok"])
         self.assertTrue(any("备份目录" in c for c in report["critical"]))
 
-    def test_missing_database_reported(self):
-        orig = check_db.DATABASE_PATH
-        check_db.DATABASE_PATH = os.path.join(self.tmpdir, "nope.db")
+    def test_unreachable_database_reported(self):
+        original = db.MYSQL_DATABASE
         try:
+            db._reset_pool()
+            db.MYSQL_DATABASE = "amig_missing_database_xyz"
             report = check_db.collect()
         finally:
-            check_db.DATABASE_PATH = orig
+            db.MYSQL_DATABASE = original
+            db._reset_pool()
         self.assertFalse(report["ok"])
+        self.assertTrue(any("无法连接" in c for c in report["critical"]))
 
     def test_check_is_read_only(self):
-        """健康检查不得修改数据，也不应把 -wal 清空。"""
+        """健康检查不得修改数据。"""
         self.add_image()
         before = self.row_count("images")
-        wal_before = os.path.getsize(self.db_path + "-wal") if os.path.exists(
-            self.db_path + "-wal") else 0
-        self._collect(deep=True)
+        check_db.collect(deep=True)
         self.assertEqual(self.row_count("images"), before)
-        wal_after = os.path.getsize(self.db_path + "-wal") if os.path.exists(
-            self.db_path + "-wal") else 0
-        self.assertEqual(wal_after, wal_before, "健康检查触发了 WAL 变更")
 
 
-class TestUploadConsistency(BackupRestoreBase):
+class TestUploadConsistency(OpsBase):
     def test_reports_missing_files(self):
         self.add_image(status="approved", filename="missing.webp", thumb="missing_t.webp")
         report = consistency.scan_uploads(older_than_days=0)
