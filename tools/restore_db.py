@@ -1,37 +1,39 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""数据库恢复工具（离线命令行；禁止在 Web 请求中调用）。
+"""数据库恢复工具（MySQL，离线命令行；禁止在 Web 请求中调用）。
 
 用法：
     python tools/restore_db.py --list                      # 列出可用备份
-    python tools/restore_db.py --backup backups/backup_xxx.db --yes
+    python tools/restore_db.py --backup backups/backup_xxx.sql --yes
     python tools/restore_db.py --backup ... --yes --restore-uploads
     python tools/restore_db.py --backup ... --yes --restore-uploads --force-uploads
 
 安全流程（每一步失败都立即中止，绝不做"半恢复"）：
-1. 校验备份文件本身：integrity_check + foreign_key_check + 关键表存在。
+1. 校验备份文件本身：Dump completed 尾标 + 全部业务表结构存在。
 2. 要求 --yes 显式确认；不带 --yes 时只打印将要执行的操作后退出。
-3. 恢复前把当前生产库复制为 pre_restore_<时间戳>.db 作为回退点。
-4. 把备份复制到目标目录下的临时文件并校验，再原子替换，避免出现"半个数据库"。
-5. 替换前把现有库及 -wal/-shm 改名保留（不是直接删除）：替换失败时原样还原，
-   不会因删除 WAL 而丢失旧库中尚未 checkpoint 的已提交数据。
-6. 对替换后的数据库再次执行完整性校验，失败时用回退点自动还原。
+3. 恢复前用 mysqldump 把当前数据库导出为 pre_restore_<时间戳>.sql 作为回退点，
+   回退副本同样通过校验后才继续。
+4. 用 mysql 客户端把备份导入目标库（dump 内含 DROP TABLE IF EXISTS +
+   CREATE TABLE，恢复即整库表级替换）。
+5. 导入后核对：全部业务表存在、行数与备份清单一致（清单缺失时跳过行数核对）、
+   likes 表无孤儿点赞记录；任一失败则自动用回退副本恢复原库。
 
-必须停掉 Web 进程后再执行：Windows 上打开中的文件无法被 os.replace 覆盖。
+执行前必须停掉 Web 进程，避免恢复过程中业务连接写入造成数据竞争。
 """
 import argparse
 import json
 import os
 import shutil
-import sqlite3
 import sys
 import tarfile
-import tempfile
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.config import BACKUP_DIR, DATABASE_PATH, PRIVATE_UPLOADS_DIR, UPLOADS_DIR
+from app import config
+from app import database
+from app.database import EXPECTED_TABLES
+from tools import mysql_cli
 
 PREFIX = "backup_"
 REQUIRED_TABLES = {"images", "likes", "admin_logs", "settings"}
@@ -49,11 +51,8 @@ def _human(n):
     return f"{n:.2f} GB"
 
 
-def _open_ro(path):
-    uri = "file:" + str(path).replace("\\", "/") + "?mode=ro"
-    conn = sqlite3.connect(uri, uri=True)
-    conn.row_factory = sqlite3.Row
-    return conn
+def _manifest_path(backup_path):
+    return str(backup_path) + ".manifest.json"
 
 
 def verify_backup(path):
@@ -62,176 +61,174 @@ def verify_backup(path):
     if not os.path.isfile(path):
         return False, f"备份文件不存在: {path}", info
     info["size"] = os.path.getsize(path)
+    if info["size"] == 0:
+        return False, "备份文件为空", info
     try:
-        conn = _open_ro(path)
-    except sqlite3.Error as exc:
-        return False, f"无法打开备份: {exc}", info
-    try:
+        with open(path, "rb") as fh:
+            fh.seek(max(0, info["size"] - 200))
+            tail = fh.read().decode("utf-8", errors="replace")
+        if "Dump completed" not in tail:
+            return False, "备份缺少 Dump completed 尾标，可能不完整", info
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            content = fh.read()
+    except OSError as exc:
+        return False, f"无法读取备份: {exc}", info
+    tables = set()
+    marker = "CREATE TABLE `"
+    idx = 0
+    while True:
+        idx = content.find(marker, idx)
+        if idx < 0:
+            break
+        rest = content[idx + len(marker):]
+        name = rest.split("`", 1)[0]
+        if name:
+            tables.add(name)
+        idx += len(marker)
+    info["tables"] = sorted(tables)
+    missing = REQUIRED_TABLES - tables
+    if missing:
+        return False, f"备份缺少关键表: {', '.join(sorted(missing))}", info
+    # 行数清单（backup_db 生成；缺失不算失败，仅跳过行数核对）
+    manifest_file = _manifest_path(path)
+    if os.path.isfile(manifest_file):
         try:
-            row = conn.execute("PRAGMA integrity_check").fetchone()
-        except sqlite3.Error as exc:
-            return False, f"integrity_check 失败: {exc}", info
-        integrity = (row[0] if row else "") or ""
-        if integrity.lower() != "ok":
-            return False, f"备份已损坏: {integrity[:200]}", info
-        try:
-            fk = conn.execute("PRAGMA foreign_key_check").fetchall()
-        except sqlite3.Error as exc:
-            return False, f"foreign_key_check 失败: {exc}", info
-        if fk:
-            return False, f"备份存在 {len(fk)} 条外键违规", info
-        tables = {
-            r[0] for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        }
-        info["tables"] = len(tables)
-        missing = REQUIRED_TABLES - tables
-        if missing:
-            return False, f"备份缺少关键表: {', '.join(sorted(missing))}", info
-        counts = {}
-        for table in sorted(REQUIRED_TABLES):
-            try:
-                counts[table] = conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
-            except sqlite3.Error:
-                counts[table] = None
-        info["row_counts"] = counts
-        try:
-            info["schema_versions"] = [
-                r[0] for r in conn.execute(
-                    "SELECT version FROM schema_migrations ORDER BY version"
-                ).fetchall()
-            ]
-        except sqlite3.Error:
-            info["schema_versions"] = []
-        return True, "备份校验通过", info
-    finally:
-        conn.close()
+            with open(manifest_file, "r", encoding="utf-8") as fh:
+                manifest = json.load(fh)
+            info["row_counts"] = manifest.get("row_counts", {})
+            info["manifest"] = manifest_file
+        except (OSError, ValueError) as exc:
+            return False, f"备份行数清单无法读取: {exc}", info
+    return True, "备份校验通过", info
 
 
 def list_backups(backup_dir):
-    """列出可恢复的备份，包含备份前自动生成的回退点。"""
+    """列出可恢复的备份，包含恢复前自动生成的回退点。"""
     try:
         names = sorted(
             n for n in os.listdir(backup_dir)
-            if n.endswith(".db") and (n.startswith(PREFIX) or n.startswith("pre_restore_"))
+            if n.endswith(".sql") and (n.startswith(PREFIX) or n.startswith("pre_restore_"))
         )
     except OSError:
         return []
     return [os.path.join(backup_dir, n) for n in names]
 
 
-def _safety_copy(db_path):
-    """恢复前把当前库复制到备份目录，作为自动回退点。"""
-    if not os.path.exists(db_path):
-        return None
-    stamp = _stamp()
-    target = os.path.join(str(BACKUP_DIR), f"pre_restore_{stamp}.db")
-    os.makedirs(str(BACKUP_DIR), exist_ok=True)
-    # 用 Online Backup API 而不是 copy：当前库可能还有未 checkpoint 的 WAL 内容
-    src = _open_ro(db_path)
-    try:
-        dest = sqlite3.connect(target)
+def _safety_dump(target_path):
+    """恢复前把当前库导出到 target_path 作为回退点，返回 (ok, detail)。"""
+    ok, detail = backup_database(target_path)
+    if not ok:
+        return False, detail
+    # 回退副本本身也必须完整，否则不能继续恢复
+    size = os.path.getsize(target_path)
+    with open(target_path, "rb") as fh:
+        fh.seek(max(0, size - 200))
+        tail = fh.read().decode("utf-8", errors="replace")
+    if "Dump completed" not in tail:
+        return False, "恢复前回退副本校验失败（可能当前库无法导出）"
+    return True, "已创建恢复前回退副本"
+
+
+def backup_database(target_path):
+    """mysqldump 导出当前库到 target_path（backup_db 同款逻辑，供回退使用）。"""
+    dump_path = mysql_cli.find_mysqldump()
+    if not dump_path:
+        return False, "未找到 mysqldump（请安装 MySQL 客户端或设置 MYSQLDUMP_PATH）"
+    base_args, env = mysql_cli.build_password_args(dump_path)
+    args = base_args + [
+        "--single-transaction",
+        "--quick",
+        "--no-tablespaces",
+        f"--result-file={target_path}",
+        str(database.MYSQL_DATABASE),
+    ]
+    proc = mysql_cli.run_client(dump_path, args, env)
+    if proc.returncode != 0:
+        detail = (proc.stderr or "").strip().splitlines()
+        detail = detail[-1] if detail else f"exit code {proc.returncode}"
+        return False, f"mysqldump 执行失败: {detail}"
+    return True, "mysqldump 完成"
+
+
+def _import_dump(backup_path):
+    """用 mysql 客户端把备份导入目标库，返回 (ok, detail)。"""
+    cli_path = mysql_cli.find_mysql_client()
+    if not cli_path:
+        return False, "未找到 mysql 客户端（请安装 MySQL 客户端或设置 MYSQL_CLIENT_PATH）"
+    base_args, env = mysql_cli.build_password_args(cli_path)
+    args = base_args + [str(database.MYSQL_DATABASE)]
+    proc = mysql_cli.run_client(cli_path, args, env, input_file=backup_path)
+    if proc.returncode != 0:
+        detail = (proc.stderr or "").strip().splitlines()
+        detail = detail[-1] if detail else f"exit code {proc.returncode}"
+        return False, f"mysql 导入失败: {detail}"
+    return True, "mysql 导入完成"
+
+
+def _db_row_counts():
+    """从当前库读取各业务表行数，返回 dict；表缺失返回 None 占位。"""
+    from app.database import get_db
+
+    db = get_db()
+    counts = {}
+    for table in EXPECTED_TABLES:
         try:
-            src.backup(dest)
-        finally:
-            dest.close()
-    finally:
-        src.close()
-    return target
+            counts[table] = db.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()["c"]
+        except Exception:
+            counts[table] = None
+    return counts
 
 
-def _swap_path(src, dst):
-    """os.replace 的薄封装：目录/文件原子改名，测试可单独替换。"""
-    os.replace(src, dst)
+def _post_verify(manifest_counts):
+    """导入后的数据完整性核对，返回 (ok, detail)。
 
-
-def _preserve_live_files(db_path):
-    """把现有库与 -wal/-shm/-journal 改名保留，返回 [(原路径, 保留路径)]。
-
-    任何一步失败都撤销已改名文件并抛 RuntimeError，保证当前库完整可用。
-    不能先删除 WAL：其中可能含尚未 checkpoint 的已提交事务，删除即丢失。
+    - 全部业务表存在；
+    - 行数与备份清单一致（清单缺失时跳过，只检查表存在）；
+    - likes 表不存在指向已删除图片的孤儿记录。
     """
-    saved = []
-    try:
-        for suffix in ("-wal", "-shm", "-journal"):
-            src = db_path + suffix
-            if os.path.exists(src):
-                dst = src + ".pre_restore"
-                _swap_path(src, dst)
-                saved.append((src, dst))
-        if os.path.exists(db_path):
-            dst = db_path + ".pre_restore"
-            _swap_path(db_path, dst)
-            saved.append((db_path, dst))
-    except OSError as exc:
-        _restore_saved_files(saved)
-        raise RuntimeError(
-            f"无法保留现有数据库文件（请先停止 Web 进程）: {exc}"
-        )
-    return saved
+    from app.database import get_db
+
+    db = get_db()
+    counts = _db_row_counts()
+    missing = [t for t, c in counts.items() if c is None]
+    if missing:
+        return False, f"恢复后缺少业务表: {', '.join(missing)}"
+    if manifest_counts:
+        mismatch = [
+            f"{t}: 期望 {manifest_counts[t]}, 实际 {counts[t]}"
+            for t, c in counts.items()
+            if t in manifest_counts and manifest_counts[t] != c
+        ]
+        if mismatch:
+            return False, "恢复后行数与备份清单不一致: " + "; ".join(mismatch[:5])
+    drift = db.execute(
+        "SELECT COUNT(*) AS c FROM likes l LEFT JOIN images i ON l.image_id = i.id "
+        "WHERE i.id IS NULL"
+    ).fetchone()["c"]
+    if drift:
+        return False, f"恢复后存在 {drift} 条孤儿点赞记录（image_id 无对应图片）"
+    return True, f"恢复后校验通过（行数: " + ", ".join(
+        f"{t}={c}" for t, c in sorted(counts.items()) if t in REQUIRED_TABLES
+    ) + ")"
 
 
-def _restore_saved_files(saved):
-    """把改名保留的旧库文件还原回原路径（替换失败时使用）。"""
-    for original, moved in reversed(saved):
-        try:
-            if os.path.exists(moved):
-                _swap_path(moved, original)
-        except OSError:
-            pass
-
-
-def _discard_saved_files(saved):
-    for _, moved in saved:
-        try:
-            os.remove(moved)
-        except OSError:
-            pass
-
-
-def restore_database(backup_path, db_path):
-    """执行原子替换，返回 (ok, detail)。"""
-    parent = os.path.dirname(os.path.abspath(db_path)) or "."
-    os.makedirs(parent, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(prefix=".restore_", suffix=".db", dir=parent)
-    os.close(fd)
-    try:
-        shutil.copyfile(backup_path, tmp_path)
-        # 先在临时位置验证复制结果，确认无误后再替换正式文件
-        ok, detail, _ = verify_backup(tmp_path)
-        if not ok:
-            return False, f"复制后的数据库校验失败: {detail}"
-        try:
-            saved = _preserve_live_files(db_path)
-        except RuntimeError as exc:
-            return False, str(exc)
-        try:
-            _swap_path(tmp_path, db_path)
-        except OSError as exc:
-            # 替换失败：把旧库与 WAL 原样放回，保持修复前的可用状态
-            _restore_saved_files(saved)
-            return False, f"替换数据库失败（Web 进程是否仍在运行？）: {exc}"
-        # 新库已就位；旧库及旧 WAL 已由恢复前安全副本覆盖，可以直接清理
-        _discard_saved_files(saved)
-        return True, "已替换数据库文件"
-    except OSError as exc:
-        return False, f"替换数据库失败（Web 进程是否仍在运行？）: {exc}"
-    finally:
-        for suffix in ("", "-wal", "-shm", "-journal"):
-            try:
-                if os.path.exists(tmp_path + suffix):
-                    os.remove(tmp_path + suffix)
-            except OSError:
-                pass
+def restore_database(backup_path, manifest_counts=None):
+    """执行导入 + 恢复后校验，返回 (ok, detail)。不自动回滚（由 main 统一处理）。"""
+    ok, detail = _import_dump(backup_path)
+    if not ok:
+        return False, detail
+    ok, detail = _post_verify(manifest_counts)
+    if not ok:
+        return False, detail
+    return True, detail
 
 
 def _archive_for_backup(backup_path):
     """返回与备份配对的 uploads 归档路径；不存在时返回 None。"""
     path = os.path.abspath(str(backup_path))
-    if not path.lower().endswith(".db"):
+    if not path.lower().endswith(".sql"):
         return None
-    archive = path[: -len(".db")] + "_uploads.tar.gz"
+    archive = path[: -len(".sql")] + "_uploads.tar.gz"
     return archive if os.path.isfile(archive) else None
 
 
@@ -251,7 +248,7 @@ def _archive_relative_names(archive):
 def check_backup_set(backup_path):
     """校验备份数据库与配对上传归档，返回结果字典。
 
-    - 数据库：integrity_check、foreign_key_check、关键表（同 verify_backup）；
+    - 数据库：Dump completed 尾标、关键表结构（同 verify_backup）；
     - 上传归档：必须与备份文件同名配对，且包含数据库引用的全部图片文件。
     只有数据库、没有归档时给出警告但不算失败（允许仅备份数据库）。
     """
@@ -284,34 +281,12 @@ def check_backup_set(backup_path):
         result["error"] = f"上传归档无法读取: {exc}"
         return result
     result["uploads_files"] = len(names)
-
-    try:
-        conn = _open_ro(backup_path)
-        try:
-            rows = conn.execute(
-                "SELECT filename, thumb_filename FROM images"
-            ).fetchall()
-        finally:
-            conn.close()
-    except sqlite3.Error as exc:
-        result["ok"] = False
-        result["error"] = f"读取备份图片记录失败: {exc}"
-        return result
-
-    expected = set()
-    for row in rows:
-        for name in (row["filename"], row["thumb_filename"]):
-            if name:
-                expected.add(str(name).replace("\\", "/"))
-    result["expected_files"] = len(expected)
-    missing = sorted(expected - names)
-    if missing:
-        result["ok"] = False
-        result["missing_files"] = missing[:50]
-        result["error"] = (
-            f"{len(missing)} 个数据库引用的图片不在上传归档中"
-            f"（示例: {', '.join(missing[:3])}）"
-        )
+    # 备份为 SQL 文本，逐行解析图片记录脆弱且代价高；
+    # 图片文件核对改为恢复后用 tools/check_uploads.py 在数据库上执行。
+    result["warning"] = (
+        "上传归档包含 %d 个文件；图片记录核对请恢复后在数据库上运行 "
+        "tools/check_uploads.py" % len(names)
+    )
     return result
 
 
@@ -338,8 +313,8 @@ def restore_uploads(backup_path, force):
         )
 
     mapping = {
-        os.path.basename(os.path.normpath(str(UPLOADS_DIR))): str(UPLOADS_DIR),
-        os.path.basename(os.path.normpath(str(PRIVATE_UPLOADS_DIR))): str(PRIVATE_UPLOADS_DIR),
+        os.path.basename(os.path.normpath(str(config.UPLOADS_DIR))): str(config.UPLOADS_DIR),
+        os.path.basename(os.path.normpath(str(config.PRIVATE_UPLOADS_DIR))): str(config.PRIVATE_UPLOADS_DIR),
     }
     if any(os.path.isdir(p) for p in mapping.values()) and not force:
         return False, "上传目录已存在；确认覆盖请加 --force-uploads（旧目录会改名保留）"
@@ -363,6 +338,7 @@ def restore_uploads(backup_path, force):
     stamp = _stamp()
     staging = {name: _prepare_staging(target, stamp) for name, target in mapping.items()}
     extracted = 0
+    extracted_names = set()
     try:
         with tarfile.open(archive, "r:gz") as tar:
             for member in tar.getmembers():
@@ -383,6 +359,8 @@ def restore_uploads(backup_path, force):
                 with src, open(dest, "wb") as out:
                     shutil.copyfileobj(src, out)
                 extracted += 1
+                extracted_names.add(relative)
+                extracted_names.add(os.path.basename(relative))
     except (OSError, tarfile.TarError) as exc:
         for path in staging.values():
             shutil.rmtree(path, ignore_errors=True)
@@ -421,11 +399,43 @@ def restore_uploads(backup_path, force):
     detail = f"已恢复 {extracted} 个上传文件（来自 {os.path.basename(archive)}）"
     if kept:
         detail += f"；旧目录已保留: {', '.join(kept)}"
+
+    # 完整性校验：数据库中仍在引用的图片文件必须都出现在归档里
+    missing = _missing_referenced_files(extracted_names)
+    if missing:
+        preview = ", ".join(missing[:10])
+        return False, (
+            f"上传归档缺少 {len(missing)} 个数据库仍在引用的文件（如 {preview}）；"
+            "数据库与目录已按归档恢复，请人工核对是否使用了错误的备份"
+        )
     return True, detail
 
 
+def _missing_referenced_files(archive_names):
+    """返回数据库中引用、但归档中不存在的文件名列表。"""
+    from app.database import get_db
+
+    rows = get_db().execute(
+        "SELECT filename, thumb_filename FROM images"
+    ).fetchall()
+    missing = []
+    for row in rows:
+        for key in ("filename", "thumb_filename"):
+            name = row[key]
+            if not name:
+                continue
+            if name not in archive_names and os.path.basename(name) not in archive_names:
+                missing.append(name)
+    return missing
+
+
+def _swap_path(src, dst):
+    """os.replace 的薄封装：目录/文件原子改名，测试可单独替换。"""
+    os.replace(src, dst)
+
+
 def main():
-    parser = argparse.ArgumentParser(description="AMIG 数据库恢复（离线执行）")
+    parser = argparse.ArgumentParser(description="AMIG 数据库恢复（MySQL，离线执行）")
     parser.add_argument("--backup", help="要恢复的备份文件路径")
     parser.add_argument("--list", action="store_true", help="列出可用备份")
     parser.add_argument("--check", action="store_true",
@@ -438,16 +448,15 @@ def main():
     parser.add_argument("--json", action="store_true", help="以 JSON 输出")
     args = parser.parse_args()
 
-    db_path = str(DATABASE_PATH)
-    result = {"ok": False, "database": db_path, "backup": None,
+    result = {"ok": False, "database": str(database.MYSQL_DATABASE), "backup": None,
               "pre_restore_copy": None, "steps": [], "error": None}
 
     if args.list:
-        items = list_backups(str(BACKUP_DIR))
+        items = list_backups(str(config.BACKUP_DIR))
         if args.json:
             print(json.dumps({"backups": items}, ensure_ascii=False, indent=2))
         else:
-            print(f"备份目录: {BACKUP_DIR}")
+            print(f"备份目录: {config.BACKUP_DIR}")
             if not items:
                 print("  （空）")
             for item in items:
@@ -469,19 +478,14 @@ def main():
         print(f"备份文件: {report['backup']}")
         if report.get("info", {}).get("size") is not None:
             print(f"备份大小: {_human(report['info']['size'])}")
-        print(f"备份记录数: {report.get('info', {}).get('row_counts')}")
-        print(f"schema 版本: {report.get('info', {}).get('schema_versions')}")
+        print(f"备份表结构: {report.get('info', {}).get('tables')}")
+        print(f"备份行数清单: {report.get('info', {}).get('row_counts')}")
         print(f"数据库校验: {report['detail']}")
         if report["uploads_archive"]:
             print(f"上传归档: {report['uploads_archive']}")
             print(f"归档文件数: {report['uploads_files']}")
-            print(f"数据库引用文件数: {report['expected_files']}")
         elif report.get("warning"):
-            print(f"[警告] {report['warning']}")
-        if report["missing_files"]:
-            print(f"缺失文件（前 {len(report['missing_files'])} 个）:")
-            for name in report["missing_files"]:
-                print(f"  - {name}")
+            print(f"[提示] {report['warning']}")
         if report["ok"]:
             print("\n[通过] 备份可用")
         else:
@@ -500,6 +504,7 @@ def main():
         _emit(result, args.json)
         return 1
     result["steps"].append(f"备份校验通过：{detail}")
+    manifest_counts = info.get("row_counts")
 
     if not args.json:
         print("=" * 60)
@@ -507,18 +512,11 @@ def main():
         print("=" * 60)
         print(f"备份文件: {backup_path}")
         print(f"备份大小: {_human(info.get('size', 0))}")
-        print(f"备份记录数: {info.get('row_counts')}")
-        print(f"备份 schema 版本: {info.get('schema_versions')}")
-        print(f"目标数据库: {db_path}")
-        if os.path.exists(db_path):
-            print(f"当前数据库大小: {_human(os.path.getsize(db_path))}")
-            # 正常停服后通常没有 -wal；不能对不存在的文件调用 getsize
-            wal_path = db_path + "-wal"
-            wal_size = os.path.getsize(wal_path) if os.path.exists(wal_path) else 0
-            print(f"当前数据库 WAL: {_human(wal_size)}")
+        print(f"备份行数清单: {info.get('row_counts') or '（无清单，恢复后仅校验表结构）'}")
+        print(f"目标数据库: {database.MYSQL_DATABASE} @ {config.MYSQL_HOST}:{config.MYSQL_PORT}")
         print()
-        print("此操作会用备份覆盖当前数据库；旧的 -wal/-shm 会先改名保留，")
-        print("替换成功后清理，失败时自动还原。")
+        print("此操作会覆盖当前数据库的全部表；恢复前会自动导出回退副本，")
+        print("导入或校验失败时自动用回退副本还原。请先停止 Web 进程。")
 
     if not args.yes:
         if not args.json:
@@ -528,34 +526,29 @@ def main():
         _emit(result, args.json, silent=True)
         return 2
 
-    try:
-        safety = _safety_copy(db_path)
-    except (OSError, sqlite3.Error) as exc:
-        result["error"] = f"无法创建恢复前回退副本，已中止: {exc}"
+    # 恢复前回退副本
+    safety = os.path.join(str(config.BACKUP_DIR), f"pre_restore_{_stamp()}.sql")
+    os.makedirs(str(config.BACKUP_DIR), exist_ok=True)
+    ok, detail = _safety_dump(safety)
+    if not ok:
+        result["error"] = f"无法创建恢复前回退副本，已中止: {detail}"
         _emit(result, args.json, header=False)
         return 1
     result["pre_restore_copy"] = safety
     result["steps"].append(f"已创建恢复前副本: {safety}")
 
-    restored, message = restore_database(backup_path, db_path)
+    restored, message = restore_database(backup_path, manifest_counts)
     result["steps"].append(message)
     if not restored:
         result["error"] = message
+        # 自动用回退副本还原原库，避免留下半恢复状态
+        rb_ok, rb_msg = restore_database(safety)
+        result["steps"].append(
+            f"已自动回滚到恢复前副本: {rb_msg}" if rb_ok
+            else f"自动回滚失败（请手工执行: python tools/restore_db.py --backup {safety} --yes）"
+        )
         _emit(result, args.json, header=False)
         return 1
-
-    # 替换后再校验一次；失败则用回退点自动还原，避免留下不可用数据库
-    ok, detail, _ = verify_backup(db_path)
-    if not ok:
-        result["error"] = f"恢复后的数据库校验失败: {detail}"
-        if safety and os.path.exists(safety):
-            rollback_ok, rollback_msg = restore_database(safety, db_path)
-            result["steps"].append(
-                f"已尝试自动回滚: {rollback_msg}" if rollback_ok else "自动回滚失败，请手工恢复"
-            )
-        _emit(result, args.json, header=False)
-        return 1
-    result["steps"].append(f"恢复后校验通过：{detail}")
 
     if args.restore_uploads:
         up_ok, up_msg = restore_uploads(backup_path, args.force_uploads)

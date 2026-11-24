@@ -22,6 +22,9 @@ uploads/*
 !uploads/.gitkeep
 private_uploads/*
 !private_uploads/.gitkeep
+# 恢复上传目录时保留的旧目录
+uploads.pre_restore_*/
+private_uploads.pre_restore_*/
 
 # ===== 日志 =====
 *.log

@@ -1,52 +1,32 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""数据库健康检查工具（严格只读）。
+"""数据库健康检查工具（MySQL，严格只读：只执行 SELECT / SHOW / CHECK TABLE）。
 
 用法：
     python tools/check_db.py                # 输出健康报告
     python tools/check_db.py --json         # 机器可读输出
-    python tools/check_db.py --deep         # 额外执行 integrity_check（大库较慢）
+    python tools/check_db.py --deep         # 额外执行 CHECK TABLE（大库较慢）
 
-默认只读：以 SQLite URI `mode=ro` 打开数据库，不写任何数据、不执行
-checkpoint、不创建 -wal / -shm 文件。检查项与判定阈值见下方常量。
+检查项：连通性、MySQL 版本、字符集、业务表齐全、schema 迁移记录、行数、
+审核状态一致性、点赞计数漂移、孤儿点赞记录、备份目录安全与保留状态。
 
 退出码：0 表示无 critical 问题；1 表示存在 critical 问题或无法检查。
 """
 import argparse
 import json
 import os
-import sqlite3
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.config import (
-    BACKUP_DIR,
-    DATABASE_PATH,
-    DB_BUSY_TIMEOUT_MS,
-    DB_SYNCHRONOUS,
-    DB_WAL_AUTOCHECKPOINT_PAGES,
-    PRIVATE_UPLOADS_DIR,
-    UPLOADS_DIR,
-)
+from app import config
+from app import database
+from app.database import EXPECTED_TABLES, DatabaseError, get_db, get_db_status
 
-# WAL 文件超过该大小说明长期未 checkpoint，读性能与恢复时间都会受影响
-WAL_WARN_BYTES = 64 * 1024 * 1024
-# busy_timeout 低于此值在多 worker 写入时容易直接抛 "database is locked"
-BUSY_TIMEOUT_WARN_MS = 1000
-# 业务表清单：缺失任意一张都视为结构异常（与 app/database.py 的建表语句保持一致）
-EXPECTED_TABLES = {
-    "images", "likes", "admin_logs", "admins", "sessions", "settings",
-    "friend_links", "pages", "ban_list", "cooling", "login_rate_limits",
-    "daily_stats", "view_sessions", "schema_migrations",
-}
-
-
-def _size(path):
-    try:
-        return os.path.getsize(path)
-    except OSError:
-        return 0
+# 持续统计的业务表（行数用于快速判断库是否"活着"）
+COUNT_TABLES = ("images", "likes", "admin_logs", "sessions", "view_sessions")
+# 索引数量低于该值提示初始化可能不完整
+MIN_INDEX_COUNT = 15
 
 
 def _human(n):
@@ -59,8 +39,8 @@ def _human(n):
 
 def _check_paths(report):
     """备份目录不得位于 Web 可访问路径下，否则备份可被直接下载。"""
-    backup = os.path.abspath(str(BACKUP_DIR))
-    for label, directory in (("uploads", UPLOADS_DIR), ("private_uploads", PRIVATE_UPLOADS_DIR)):
+    backup = os.path.abspath(str(config.BACKUP_DIR))
+    for label, directory in (("uploads", config.UPLOADS_DIR), ("private_uploads", config.PRIVATE_UPLOADS_DIR)):
         target = os.path.abspath(str(directory))
         try:
             inside = os.path.commonpath([backup, target]) == target
@@ -76,175 +56,151 @@ def _check_paths(report):
         # 只统计数据库备份；_uploads.tar.gz 归档与回退点不计入保留份数
         count = len([
             n for n in os.listdir(backup)
-            if n.startswith("backup_") and n.endswith(".db")
+            if n.startswith("backup_") and n.endswith(".sql")
         ])
         report["backup_count"] = count
         if count == 0:
             report["warnings"].append("备份目录为空，建议至少保留一份可恢复备份")
-    # 数据库文件不应落在上传目录中
-    db_abs = os.path.abspath(str(DATABASE_PATH))
-    for label, directory in (("uploads", UPLOADS_DIR), ("private_uploads", PRIVATE_UPLOADS_DIR)):
-        target = os.path.abspath(str(directory))
-        try:
-            if os.path.commonpath([db_abs, target]) == target:
-                report["critical"].append(f"数据库文件位于 {label} 目录内，存在泄露风险: {db_abs}")
-        except ValueError:
-            pass
 
 
-def _check_tables(conn, report):
-    rows = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+def _check_tables(db, report):
+    rows = db.execute(
+        "SELECT table_name AS name FROM information_schema.tables "
+        "WHERE table_schema=? AND table_type='BASE TABLE'",
+        (str(database.MYSQL_DATABASE),),
     ).fetchall()
-    names = {r[0] for r in rows}
+    names = {r["name"] for r in rows}
     report["tables"] = sorted(names)
-    missing = EXPECTED_TABLES - names
+    missing = set(EXPECTED_TABLES) - names
     if missing:
         report["critical"].append(f"缺少业务表: {', '.join(sorted(missing))}")
-    index_count = conn.execute(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='index'"
-    ).fetchone()[0]
+    index_count = db.execute(
+        "SELECT COUNT(DISTINCT index_name) AS c FROM information_schema.statistics "
+        "WHERE table_schema=? AND index_name <> 'PRIMARY'",
+        (str(database.MYSQL_DATABASE),),
+    ).fetchone()["c"]
     report["index_count"] = index_count
-    if index_count < 20:
+    if index_count < MIN_INDEX_COUNT:
         report["warnings"].append(f"索引数量异常偏少（{index_count}），可能未执行完整初始化")
 
 
-def _check_versions(conn, report):
+def _check_versions(db, report):
     try:
-        rows = conn.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
-        versions = [r[0] for r in rows]
+        rows = db.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall()
+        versions = [r["version"] for r in rows]
         report["schema_versions"] = versions
         if not versions:
             report["warnings"].append("schema_migrations 为空，数据库可能从未完成初始化迁移")
-    except sqlite3.Error as exc:
+    except DatabaseError as exc:
         report["warnings"].append(f"无法读取 schema_migrations: {exc}")
 
 
-def _check_data(conn, report):
+def _check_data(db, report):
     counts = {}
-    for table in ("images", "likes", "admin_logs", "sessions", "view_sessions"):
+    for table in COUNT_TABLES:
         try:
-            counts[table] = conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
-        except sqlite3.Error:
+            counts[table] = db.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()["c"]
+        except DatabaseError:
             counts[table] = None
     report["row_counts"] = counts
     # 状态一致性：approved 的图片必须有 reviewed_at，否则审核状态机被绕过
     try:
-        bad = conn.execute(
-            "SELECT COUNT(*) FROM images WHERE status='approved' AND reviewed_at IS NULL"
-        ).fetchone()[0]
+        bad = db.execute(
+            "SELECT COUNT(*) AS c FROM images WHERE status='approved' AND reviewed_at IS NULL"
+        ).fetchone()["c"]
         if bad:
             report["warnings"].append(f"{bad} 条 approved 图片缺少 reviewed_at（状态机异常）")
-    except sqlite3.Error:
+    except DatabaseError:
         pass
     # 点赞计数漂移：images.like_count 应与 likes 实际行数一致
     try:
-        drift = conn.execute(
-            "SELECT COUNT(*) FROM images i WHERE i.like_count <> "
+        drift = db.execute(
+            "SELECT COUNT(*) AS c FROM images i WHERE i.like_count <> "
             "(SELECT COUNT(*) FROM likes l WHERE l.image_id = i.id)"
-        ).fetchone()[0]
+        ).fetchone()["c"]
         report["like_count_drift"] = drift
         if drift:
             report["warnings"].append(f"{drift} 条图片的 like_count 与点赞记录数不一致")
-    except sqlite3.Error:
+    except DatabaseError:
+        pass
+    # 孤儿点赞：正常由外键约束阻止，恢复/手工导入后可能出现
+    try:
+        orphan = db.execute(
+            "SELECT COUNT(*) AS c FROM likes l LEFT JOIN images i ON l.image_id = i.id "
+            "WHERE i.id IS NULL"
+        ).fetchone()["c"]
+        if orphan:
+            report["critical"].append(f"存在 {orphan} 条孤儿点赞记录（image_id 无对应图片）")
+    except DatabaseError:
         pass
 
 
-def _check_integrity(conn, report, deep):
-    try:
-        report["journal_mode"] = conn.execute("PRAGMA journal_mode").fetchone()[0]
-    except sqlite3.Error as exc:
-        report["critical"].append(f"无法读取 journal_mode: {exc}")
-        return
-    if str(report["journal_mode"]).lower() != "wal":
-        report["warnings"].append(
-            f"journal_mode 为 {report['journal_mode']}（非 WAL），多 worker 并发读会互相阻塞"
+def _check_charset(report):
+    status = report.get("server", {})
+    charset = status.get("charset")
+    collation = status.get("collation")
+    if charset and charset.lower() != "utf8mb4":
+        report["critical"].append(
+            f"数据库默认字符集为 {charset}（应为 utf8mb4），中文/emoji 可能写入失败"
         )
-    try:
-        fk = conn.execute("PRAGMA foreign_key_check").fetchall()
-        if fk:
-            report["critical"].append(f"存在 {len(fk)} 条外键违规")
-    except sqlite3.Error as exc:
-        report["warnings"].append(f"foreign_key_check 失败: {exc}")
-    if deep:
+    elif charset:
+        report["charset_ok"] = True
+
+
+def _check_deep(db, report):
+    """CHECK TABLE 检查 InnoDB 表内部一致性（--deep 时执行）。"""
+    results = {}
+    for table in sorted(EXPECTED_TABLES):
         try:
-            row = conn.execute("PRAGMA integrity_check").fetchone()
-            result = (row[0] if row else "") or ""
-            report["integrity_check"] = result
-            if result.lower() != "ok":
-                report["critical"].append(f"integrity_check 未通过: {result[:200]}")
-        except sqlite3.Error as exc:
-            report["critical"].append(f"integrity_check 执行失败: {exc}")
-
-
-def _check_files(report):
-    db = str(DATABASE_PATH)
-    report["db_size"] = _size(db)
-    wal = db + "-wal"
-    shm = db + "-shm"
-    report["wal_size"] = _size(wal)
-    report["shm_size"] = _size(shm)
-    if report["wal_size"] > WAL_WARN_BYTES:
-        report["warnings"].append(
-            f"WAL 文件 {_human(report['wal_size'])} 偏大，建议执行 checkpoint(TRUNCATE)"
-        )
-    if not os.access(db, os.R_OK):
-        report["critical"].append(f"数据库文件不可读: {db}")
+            row = db.execute(f"CHECK TABLE {table}").fetchone()
+            # 列名随驱动返回（Table/Op/Msg_type/Msg_text）
+            msg_type = row.get("Msg_type") if row else None
+            msg_text = row.get("Msg_text") if row else None
+            results[table] = f"{msg_type}: {msg_text}" if row else "no result"
+            if msg_type == "Error" or (msg_text and msg_text != "OK"):
+                report["critical"].append(f"CHECK TABLE {table}: {msg_text}")
+        except DatabaseError as exc:
+            results[table] = f"error: {exc}"
+            report["critical"].append(f"CHECK TABLE {table} 执行失败: {exc}")
+    report["check_table"] = results
 
 
 def collect(deep=False):
     report = {
         "ok": False,
-        "database": str(DATABASE_PATH),
-        "sqlite_version": sqlite3.sqlite_version,
-        "expected": {
-            "busy_timeout_ms": DB_BUSY_TIMEOUT_MS,
-            "synchronous": DB_SYNCHRONOUS,
-            "wal_autocheckpoint_pages": DB_WAL_AUTOCHECKPOINT_PAGES,
-        },
+        "database": str(database.MYSQL_DATABASE),
+        "host": f"{config.MYSQL_HOST}:{config.MYSQL_PORT}",
         "critical": [],
         "warnings": [],
     }
-    db_path = str(DATABASE_PATH)
-    if not os.path.exists(db_path):
-        report["critical"].append(f"数据库文件不存在: {db_path}")
+    try:
+        db = get_db()
+        db.execute("SELECT 1")
+    except Exception as exc:
+        report["critical"].append(
+            f"无法连接 MySQL {config.MYSQL_HOST}:{config.MYSQL_PORT}/{database.MYSQL_DATABASE}: "
+            f"{type(exc).__name__}"
+        )
+        report["error_hint"] = (
+            "请检查 MYSQL_HOST / MYSQL_PORT / MYSQL_DATABASE / MYSQL_USER / MYSQL_PASSWORD 配置"
+        )
+        report["ok"] = not report["critical"]
         return report
 
-    _check_files(report)
-
-    uri = "file:" + db_path.replace("\\", "/") + "?mode=ro"
     try:
-        # 只用只读 URI 连接：不会创建 -wal/-shm，也不会触发 checkpoint
-        conn = sqlite3.connect(uri, uri=True, timeout=DB_BUSY_TIMEOUT_MS / 1000.0)
-    except sqlite3.Error as exc:
-        report["critical"].append(f"无法打开数据库: {exc}")
-        return report
-    try:
-        conn.row_factory = sqlite3.Row
-        try:
-            report["busy_timeout"] = conn.execute("PRAGMA busy_timeout").fetchone()[0]
-        except sqlite3.Error:
-            report["busy_timeout"] = None
-        try:
-            report["synchronous"] = conn.execute("PRAGMA synchronous").fetchone()[0]
-        except sqlite3.Error:
-            report["synchronous"] = None
-        if isinstance(report["busy_timeout"], int) and report["busy_timeout"] < BUSY_TIMEOUT_WARN_MS:
-            report["warnings"].append(
-                f"busy_timeout={report['busy_timeout']}ms 偏低，多 worker 写入容易直接报锁错误"
-            )
-        try:
-            report["page_count"] = conn.execute("PRAGMA page_count").fetchone()[0]
-            report["page_size"] = conn.execute("PRAGMA page_size").fetchone()[0]
-            report["freelist_count"] = conn.execute("PRAGMA freelist_count").fetchone()[0]
-        except sqlite3.Error:
-            pass
-        _check_integrity(conn, report, deep)
-        _check_tables(conn, report)
-        _check_versions(conn, report)
-        _check_data(conn, report)
+        report["server"] = get_db_status()
+        _check_charset(report)
+        _check_tables(db, report)
+        _check_versions(db, report)
+        _check_data(db, report)
+        if deep:
+            _check_deep(db, report)
     finally:
-        conn.close()
+        from app.database import close_db
+
+        close_db()
 
     _check_paths(report)
     report["ok"] = not report["critical"]
@@ -252,16 +208,16 @@ def collect(deep=False):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="AMIG 数据库健康检查（只读）")
+    parser = argparse.ArgumentParser(description="AMIG 数据库健康检查（MySQL，只读）")
     parser.add_argument("--json", action="store_true", help="以 JSON 输出报告")
     parser.add_argument("--deep", action="store_true",
-                        help="额外执行 integrity_check（大数据库较慢）")
+                        help="额外执行 CHECK TABLE（大数据库较慢）")
     args = parser.parse_args()
 
     try:
         report = collect(deep=args.deep)
     except Exception as exc:  # 工具本身出错也要给出可读结论
-        print(f"[失败] 健康检查异常: {exc}")
+        print(f"[失败] 健康检查异常: {type(exc).__name__}: {exc}")
         return 1
 
     if args.json:
@@ -271,22 +227,12 @@ def main():
     print("=" * 60)
     print("AMIG 数据库健康检查")
     print("=" * 60)
-    print(f"数据库: {report['database']}")
-    print(f"SQLite: {report.get('sqlite_version')}")
-    if "db_size" in report:
-        print(f"主库大小: {_human(report['db_size'])}")
-    if "wal_size" in report:
-        print(f"WAL 大小: {_human(report['wal_size'])}")
-        print(f"SHM 大小: {_human(report['shm_size'])}")
-    if "page_count" in report:
-        freelist = report.get("freelist_count", 0)
-        print(f"页数: {report['page_count']} × {report['page_size']}B，空闲页: {freelist}")
-    if "journal_mode" in report:
-        print(f"journal_mode: {report['journal_mode']}")
-    if "synchronous" in report:
-        print(f"synchronous: {report['synchronous']}")
-    if "busy_timeout" in report:
-        print(f"busy_timeout: {report['busy_timeout']}ms")
+    print(f"数据库: {report['database']} @ {report['host']}")
+    server = report.get("server", {})
+    print(f"MySQL 版本: {server.get('server_version', '-')}")
+    print(f"连接池: 空闲 {server.get('pool_idle', '-')} 个")
+    if server.get("charset"):
+        print(f"字符集: {server.get('charset')} / {server.get('collation')}")
     if "tables" in report:
         print(f"业务表: {len(report['tables'])} 张，索引: {report.get('index_count', 0)} 个")
     if "schema_versions" in report:
@@ -298,13 +244,13 @@ def main():
         print(f"点赞计数漂移: {report['like_count_drift']} 条")
     if "backup_count" in report:
         print(f"备份份数: {report['backup_count']}")
-    if report.get("integrity_check"):
-        print(f"integrity_check: {report['integrity_check']}")
 
     if report["critical"]:
         print(f"\n[严重] {len(report['critical'])} 项")
         for item in report["critical"]:
             print(f"  - {item}")
+    if report.get("error_hint"):
+        print(f"  提示: {report['error_hint']}")
     if report["warnings"]:
         print(f"\n[警告] {len(report['warnings'])} 项")
         for item in report["warnings"]:

@@ -21,7 +21,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.config import DATABASE_PATH
+from app.database import get_db
 from app.upload_consistency import (
     scan_uploads, delete_orphans, delete_temp_files, fix_misplaced_files,
 )
@@ -40,8 +40,11 @@ def main():
     parser.add_argument("--json", action="store_true", help="以 JSON 输出报告")
     args = parser.parse_args()
 
-    if not os.path.exists(DATABASE_PATH):
-        print(f"[失败] 数据库不存在: {DATABASE_PATH}（请先启动应用或执行 init_db.py）")
+    # 数据库连通性检查（MySQL 后端不再以文件存在性判断）
+    try:
+        get_db().execute("SELECT 1")
+    except Exception:
+        print("[失败] 无法连接数据库（请检查 MySQL 配置，或先执行 init_db.py 初始化）")
         return 1
     try:
         report = scan_uploads(older_than_days=max(0, args.older_than_days))
