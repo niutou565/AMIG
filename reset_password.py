@@ -11,20 +11,11 @@
 
 import os
 import sys
-import sqlite3
 import getpass
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 DEFAULT_USERNAME = "admin"
-
-
-def resolve_db_path():
-    env_path = os.getenv("DATABASE_PATH")
-    if env_path:
-        return env_path
-    base = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base, "data", "app.db")
 
 
 def hash_password(password):
@@ -89,15 +80,9 @@ def main():
 
     password = _read_password(use_stdin)
 
-    db_path = resolve_db_path()
     print("=" * 50)
     print("  管理员密码重置工具")
     print("=" * 50)
-
-    if not os.path.exists(db_path):
-        print(f"[失败] 未找到数据库文件: {db_path}")
-        print("       请确认脚本位于项目根目录，或通过 DATABASE_PATH 环境变量指定路径")
-        sys.exit(1)
 
     if not confirm_reset(DEFAULT_USERNAME, skip):
         print("[已取消] 未执行任何修改")
@@ -105,45 +90,44 @@ def main():
 
     password_hash = hash_password(password)
     try:
-        conn = sqlite3.connect(db_path, timeout=10)
-        conn.row_factory = sqlite3.Row
-        try:
-            with conn:
-                row = conn.execute(
+        from app.database import get_db, transaction, DatabaseError
+        from app.models import now_iso
+
+        db = get_db()
+        with transaction():
+            row = db.execute(
+                "SELECT id FROM admins WHERE username=?", (DEFAULT_USERNAME,)
+            ).fetchone()
+
+            if row:
+                admin_id = row["id"]
+                db.execute(
+                    "UPDATE admins SET password_hash=?, login_attempts=0, locked_until=NULL "
+                    "WHERE id=?",
+                    (password_hash, admin_id),
+                )
+                # 密码重置后所有旧会话必须失效
+                db.execute("DELETE FROM sessions WHERE admin_id=?", (admin_id,))
+            else:
+                db.execute(
+                    "INSERT INTO admins (username, password_hash, login_attempts, locked_until, created_at) "
+                    "VALUES (?, ?, 0, NULL, ?)",
+                    (DEFAULT_USERNAME, password_hash, now_iso()),
+                )
+                admin_id = db.execute(
                     "SELECT id FROM admins WHERE username=?", (DEFAULT_USERNAME,)
-                ).fetchone()
+                ).fetchone()["id"]
+                db.execute("DELETE FROM sessions WHERE admin_id=?", (admin_id,))
 
-                if row:
-                    admin_id = row["id"]
-                    conn.execute(
-                        "UPDATE admins SET password_hash=?, login_attempts=0, locked_until=NULL "
-                        "WHERE id=?",
-                        (password_hash, admin_id),
-                    )
-                    # 密码重置后所有旧会话必须失效
-                    conn.execute("DELETE FROM sessions WHERE admin_id=?", (admin_id,))
-                else:
-                    import datetime
-                    created_at = datetime.datetime.now(datetime.timezone.utc).isoformat(
-                        timespec="seconds"
-                    )
-                    conn.execute(
-                        "INSERT INTO admins (username, password_hash, login_attempts, locked_until, created_at) "
-                        "VALUES (?, ?, 0, NULL, ?)",
-                        (DEFAULT_USERNAME, password_hash, created_at),
-                    )
-                    admin_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-                    conn.execute("DELETE FROM sessions WHERE admin_id=?", (admin_id,))
-
-                # 清空登录失败限流，避免重置后仍被旧 IP 计数拦截
-                conn.execute("DELETE FROM login_rate_limits")
-        finally:
-            conn.close()
-    except sqlite3.OperationalError as e:
-        print(f"[失败] 数据库操作出错: {e}")
+            # 清空登录失败限流，避免重置后仍被旧 IP 计数拦截
+            db.execute("DELETE FROM login_rate_limits")
+    except DatabaseError as e:
+        print(f"[失败] 数据库连接或操作出错: {type(e).__name__}")
+        print("       请检查 MYSQL_HOST / MYSQL_PORT / MYSQL_USER / MYSQL_PASSWORD / MYSQL_DATABASE 配置")
+        print("       （详细错误信息已写入应用日志，不会显示数据库密码）")
         sys.exit(1)
     except Exception as e:
-        print(f"[失败] 发生未预期错误: {e}")
+        print(f"[失败] 发生未预期错误: {type(e).__name__}: {e}")
         sys.exit(1)
 
     print(f"[成功] 管理员 '{DEFAULT_USERNAME}' 密码已重置，旧会话已全部撤销")

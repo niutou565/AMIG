@@ -19,6 +19,31 @@ from app.config import (
 logger = logging.getLogger(__name__)
 
 
+class DBConnectionMiddleware:
+    """为每个 HTTP 请求建立数据库连接作用域，请求结束后归还连接。
+
+    同步路由运行在线程池线程中，线程本地连接会随线程长期存活；若不按请求
+    归还，连接池会被逐步占用直至耗尽。这里在请求开始/结束处成对管理连接，
+    保证异常路径也能归还（连接池归还前会自动回滚残留事务）。
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        # 延迟导入，避免与 app.database 形成循环依赖
+        from app.database import begin_request_scope, end_request_scope
+
+        holder, token = begin_request_scope()
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            end_request_scope(holder, token)
+
+
 class AdminDomainMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         path = request.url.path

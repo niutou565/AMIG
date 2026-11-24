@@ -24,33 +24,45 @@ if _env_path.exists():
 
 # 从环境变量加载
 ADMIN_DOMAIN = os.getenv("ADMIN_DOMAIN", "")
+# 旧 SQLite 数据库文件路径（仅作为 SQLite → MySQL 迁移工具的默认数据源，
+# 运行时业务数据一律存放在 MySQL 中）
 DATABASE_PATH = os.getenv("DATABASE_PATH", str(BASE_DIR / "data" / "app.db"))
 
-# ── SQLite 连接与 WAL 配置（第四阶段）──────────────────────────────
-# 写锁等待上限（毫秒）：超时后返回明确的 database is locked，而不是无限阻塞请求
-DB_BUSY_TIMEOUT_MS = int(os.getenv("DB_BUSY_TIMEOUT_MS", "5000"))
-# WAL 下 synchronous=FULL 每次提交都 fsync，持久性最强；允许在充分评估后设为 NORMAL
-# （WAL+NORMAL 在应用崩溃时安全，仅极端断电可能丢失最后一个事务）。默认不降低保障。
-DB_SYNCHRONOUS = os.getenv("DB_SYNCHRONOUS", "FULL").strip().upper()
-if DB_SYNCHRONOUS not in ("FULL", "NORMAL", "OFF"):
-    _RAW_DB_SYNCHRONOUS = os.getenv("DB_SYNCHRONOUS", "").strip()
-    print(
-        f"[配置警告] DB_SYNCHRONOUS 值无效：{_RAW_DB_SYNCHRONOUS or '(空)'}，"
-        "已回退为 FULL。可选值：FULL / NORMAL / OFF"
+# ── MySQL 数据库配置 ──────────────────────────────────────────────
+DB_TYPE = os.getenv("DB_TYPE", "mysql").strip().lower()
+if DB_TYPE not in ("mysql",):
+    raise SystemExit(
+        f"[配置错误] DB_TYPE 仅支持 mysql（当前值：{DB_TYPE or '(空)'}）。"
+        "AMIG 已使用 MySQL 作为唯一业务数据库后端；如需迁移旧 SQLite 数据，"
+        "请使用 tools/migrate_sqlite_to_mysql.py。"
     )
-    DB_SYNCHRONOUS = "FULL"
-# WAL 自动 checkpoint 阈值（页数，每页约 4KB；1000 页≈4MB），0 表示关闭自动 checkpoint
-DB_WAL_AUTOCHECKPOINT_PAGES = int(os.getenv("DB_WAL_AUTOCHECKPOINT_PAGES", "1000"))
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1").strip()
+MYSQL_PORT = int(os.getenv("MYSQL_PORT", "3306"))
+MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "amig").strip()
+MYSQL_USER = os.getenv("MYSQL_USER", "amig").strip()
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+# 建库与连接统一字符集；utf8mb4 保证中文与 emoji 正常存储
+MYSQL_CHARSET = os.getenv("MYSQL_CHARSET", "utf8mb4").strip()
+MYSQL_COLLATION = os.getenv("MYSQL_COLLATION", "utf8mb4_unicode_ci").strip()
+# 连接池：常驻连接数 + 可临时溢出的最大连接数；总计不得超过 MySQL max_connections
+MYSQL_POOL_SIZE = int(os.getenv("MYSQL_POOL_SIZE", "10"))
+MYSQL_POOL_MAX_OVERFLOW = int(os.getenv("MYSQL_POOL_MAX_OVERFLOW", "20"))
+# 从连接池取出连接时若超过 10 秒仍未获取到，直接报错而不是无限排队
+MYSQL_POOL_TIMEOUT = int(os.getenv("MYSQL_POOL_TIMEOUT", "10"))
+# 连接空闲超过该秒数后，下次使用前先 ping 一次并自动重连失效连接
+MYSQL_PING_IDLE_SECONDS = int(os.getenv("MYSQL_PING_IDLE_SECONDS", "60"))
+# 上传额度串行化锁（GET_LOCK）的等待秒数
+MYSQL_QUOTA_LOCK_TIMEOUT = int(os.getenv("MYSQL_QUOTA_LOCK_TIMEOUT", "5"))
 # 慢查询诊断阈值（毫秒），仅记录超过阈值的查询；0 表示关闭慢查询日志
 DB_SLOW_QUERY_MS = int(os.getenv("DB_SLOW_QUERY_MS", "200"))
+# mysqldump / mysql 客户端路径（备份恢复工具使用）；留空则自动从 PATH 与常见安装目录探测
+MYSQLDUMP_PATH = os.getenv("MYSQLDUMP_PATH", "").strip()
+MYSQL_CLIENT_PATH = os.getenv("MYSQL_CLIENT_PATH", "").strip()
 # 备份文件根目录（默认放在项目 backups/ 下，不属于任何 Web 静态目录）
 BACKUP_DIR = os.getenv("BACKUP_DIR", str(BASE_DIR / "backups"))
 # 备份默认保留份数
 BACKUP_KEEP = int(os.getenv("BACKUP_KEEP", "7"))
-# 结构迁移前是否自动做一次数据库快照备份（默认开启；备份失败则不执行迁移）
-DB_BACKUP_BEFORE_MIGRATION = os.getenv(
-    "DB_BACKUP_BEFORE_MIGRATION", "true"
-).strip().lower() in ("1", "true", "yes", "on")
 UPLOADS_DIR = os.getenv("UPLOADS_DIR", str(BASE_DIR / "uploads"))
 # 待审核/已拒绝图片的私有目录；必须位于 Web 服务器不能直接静态访问的位置。
 PRIVATE_UPLOADS_DIR = os.getenv(

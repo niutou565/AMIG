@@ -68,10 +68,10 @@ def main():
         "admin_domain": ",".join(normalize_admin_domains(ADMIN_DOMAIN)[0]),
     }
     for key, value in default_settings.items():
-        existing = db.execute("SELECT key FROM settings WHERE key=?", (key,)).fetchone()
+        existing = db.execute("SELECT `key` FROM settings WHERE `key`=?", (key,)).fetchone()
         if not existing:
             db.execute(
-                "INSERT INTO settings (key, value) VALUES (?,?)", (key, value)
+                "INSERT INTO settings (`key`, value) VALUES (?,?)", (key, value)
             )
     db.commit()
     # 旧库迁移：数据库未配置管理域名时，用 .env 的 ADMIN_DOMAIN 初始化一次

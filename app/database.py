@@ -1,346 +1,809 @@
-"""SQLite 连接、初始化与迁移管理。
+"""MySQL 数据库访问层：连接池、线程本地连接、事务管理与库表初始化。
 
-第四阶段起：
-- 所有连接参数（WAL、busy_timeout、foreign_keys、synchronous、temp_store、
-  wal_autocheckpoint）集中在本模块统一设置，业务代码不得自行调整；
-- 连接按线程隔离（threading.local），SQLite 连接不跨线程共享；
-- 提供 transaction() 上下文管理器保证多条 SQL 的原子提交/回滚；
-- 提供 schema_migrations 版本表与幂等迁移；
-- 提供 WAL checkpoint 与 PRAGMA 诊断入口，供运维工具调用（不在请求路径执行）。
+设计要点：
+- 业务模块统一通过 get_db() 获取连接包装器，不直接依赖具体驱动（PyMySQL）。
+- SQL 仍使用 ``?`` 占位符（与历史代码一致），执行前统一翻译为 MySQL 的 ``%s``。
+  注意：SQL 语句本身不允许包含字面量 ``?``；带参数的语句也不能含字面量 ``%``
+  （LIKE 模式一律通过参数传入），无参数语句则可以包含字面量 ``%``。
+- 行对象 Row 同时支持 ``row["col"]`` / ``row[0]`` / ``keys()`` / ``get()``，
+  与原 sqlite3.Row 用法兼容，业务代码无需逐行修改。
+- 连接采用「线程本地缓存 + 连接池」：同一请求内的多次 get_db() 复用同一连接；
+  空闲超过 MYSQL_PING_IDLE_SECONDS 的连接在下次使用前自动 ping，失效自动重连。
+- autocommit=True：单条语句即时提交（与原 SQLite 每函数 commit 的行为一致）；
+  多语句原子性通过 transaction() 显式开启事务 / SAVEPOINT 保证。
+- 上传额度检查等「读-改-写」操作用 GET_LOCK 串行化（见 models.reserve_upload_quota）。
 """
 import contextlib
+import contextvars
 import logging
-import os
-import sqlite3
+import queue
+import re
 import threading
 import time
 from datetime import datetime, timezone
-from pathlib import Path
+
+import pymysql
+from pymysql.cursors import DictCursor
+from pymysql.err import (
+    DatabaseError,
+    IntegrityError,
+    MySQLError,
+    OperationalError,
+)
 
 from app.config import (
     BACKUP_DIR,
-    DATABASE_PATH,
-    DB_BACKUP_BEFORE_MIGRATION,
-    DB_BUSY_TIMEOUT_MS,
-    DB_SYNCHRONOUS,
-    DB_WAL_AUTOCHECKPOINT_PAGES,
-    DB_SLOW_QUERY_MS,
+    MYSQL_CHARSET,
+    MYSQL_COLLATION,
+    MYSQL_DATABASE,
+    MYSQL_HOST,
+    MYSQL_PASSWORD,
+    MYSQL_PING_IDLE_SECONDS,
+    MYSQL_POOL_MAX_OVERFLOW,
+    MYSQL_POOL_SIZE,
+    MYSQL_POOL_TIMEOUT,
+    MYSQL_PORT,
+    MYSQL_USER,
 )
 
-# 当前 schema 版本：前三阶段的表结构在版本 4 被首次纳入版本管理；
-# 版本 5（第四阶段）：view_sessions 唯一索引、WAL/事务相关结构收敛；
-# 版本 6（第四阶段）：按实测查询计划补充两个复合索引（见 _migrate_to_v6）。
-# 今后每次结构变更递增该值，并在 _init_db_once 中实现幂等迁移。
+_logger = logging.getLogger(__name__)
+
+# 当前结构版本（与历史 SQLite schema_migrations 版本号衔接）
 SCHEMA_VERSION = 6
 
-_logger = logging.getLogger(__name__)
-_local = threading.local()
-# 记录所有线程创建的连接，保证退出时能把线程池中的连接全部关闭，
-# 否则 Windows 下残留句柄会阻塞数据库文件替换（备份恢复需要）。
-_conn_lock = threading.Lock()
-_all_conns = set()
+# 以上 from-import 使 MySQL_* 配置成为本模块属性，测试可 monkeypatch 覆盖，
+# 覆盖后调用 _reset_pool() 使连接池按新配置重建。
+
+# 允许的数据库标识符（防止配置中的库名注入到 DDL）
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_$]+$")
+
+# 单条语句遇到死锁（1213）/锁等待超时（1205）时的最大自动重试次数
+_DEADLOCK_RETRY_LIMIT = 3
 
 
-class _TimedConnection(sqlite3.Connection):
-    """带慢查询诊断的连接；只记录耗时，不记录参数，避免泄露敏感数据。"""
+# ── 行对象：兼容 sqlite3.Row 的访问方式 ───────────────────────────────
 
-    def execute(self, sql, parameters=()):
-        if DB_SLOW_QUERY_MS <= 0:
-            return super().execute(sql, parameters)
-        start = time.monotonic()
+
+class Row:
+    """行对象：支持 row["col"]、row[0]、keys()、get()、in、len 与值迭代。"""
+
+    __slots__ = ("_data", "_keys")
+
+    def __init__(self, data: dict):
+        self._data = data
+        self._keys = list(data.keys())
+
+    def keys(self):
+        return list(self._keys)
+
+    def get(self, key, default=None):
+        return self._data.get(key, default)
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            if -len(self._keys) <= key < len(self._keys):
+                return self._data[self._keys[key]]
+            raise IndexError(f"行不存在第 {key} 列")
+        if key in self._data:
+            return self._data[key]
+        raise IndexError(f"行不存在字段：{key!r}")
+
+    def __contains__(self, key):
+        return key in self._data
+
+    def __len__(self):
+        return len(self._data)
+
+    def __iter__(self):
+        return iter(self._data.values())
+
+    def __repr__(self):
+        return repr(self._data)
+
+
+class CursorWrapper:
+    """游标包装器：提供 lastrowid / rowcount / fetchone / fetchall。"""
+
+    __slots__ = ("_cur",)
+
+    def __init__(self, cursor):
+        self._cur = cursor
+
+    @property
+    def lastrowid(self):
+        return self._cur.lastrowid
+
+    @property
+    def rowcount(self):
+        return self._cur.rowcount
+
+    def fetchone(self):
+        row = self._cur.fetchone()
+        return Row(row) if row is not None else None
+
+    def fetchall(self):
+        return [Row(r) for r in self._cur.fetchall()]
+
+    def close(self):
         try:
-            return super().execute(sql, parameters)
-        finally:
-            self._log_if_slow(sql, start)
+            self._cur.close()
+        except Exception:
+            pass
 
-    def executemany(self, sql, seq_of_parameters):
-        if DB_SLOW_QUERY_MS <= 0:
-            return super().executemany(sql, seq_of_parameters)
+
+def _translate_placeholders(sql: str) -> str:
+    """把 qmark 占位符（?）翻译为 PyMySQL 的 %s。"""
+    if "?" in sql:
+        return sql.replace("?", "%s")
+    return sql
+
+
+def _is_gone_away(exc: OperationalError) -> bool:
+    """判断是否为连接失效类错误（服务器断开、超时等），可安全重连重试。"""
+    code = exc.args[0] if exc.args else None
+    return code in (2006, 2013)
+
+
+# ── 连接包装器 ───────────────────────────────────────────────────────
+
+
+class ConnectionWrapper:
+    """连接包装器：占位符翻译、空闲健康检查、失效重连、慢查询日志。"""
+
+    __slots__ = ("_conn", "_last_used", "_closed", "_pooled", "_tx_active")
+
+    def __init__(self, raw_conn):
+        self._conn = raw_conn
+        self._last_used = time.monotonic()
+        self._closed = False
+        # 是否计入连接池总量（归还/丢弃时只递减一次，避免重复计数）
+        self._pooled = False
+        # 是否处于显式事务（begin 之后、commit/rollback 之前）
+        self._tx_active = False
+
+    def execute(self, sql, params=()):
+        if self._closed:
+            raise DatabaseError("数据库连接已关闭，不能执行查询")
+        sql = _translate_placeholders(sql)
+        # 无参数时传 None，避免 PyMySQL 对 SQL 中的字面量 % 做格式化
+        # （如 LIKE '%关键词%' 这类不带参数的检索语句）
+        bind = params if params else None
+        self._ensure_alive()
         start = time.monotonic()
-        try:
-            return super().executemany(sql, seq_of_parameters)
-        finally:
-            self._log_if_slow(sql, start)
-
-    def executescript(self, sql_script):
-        if DB_SLOW_QUERY_MS <= 0:
-            return super().executescript(sql_script)
-        start = time.monotonic()
-        try:
-            return super().executescript(sql_script)
-        finally:
-            self._log_if_slow(sql_script, start)
-
-    @staticmethod
-    def _log_if_slow(sql, start):
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                cursor = self._conn.cursor()
+                cursor.execute(sql, bind)
+                break
+            except OperationalError as exc:
+                code = exc.args[0] if exc.args else None
+                # 连接被服务器断开：重连后重试一次
+                if _is_gone_away(exc) and attempt == 1 and self._reconnect():
+                    continue
+                # 单条语句（非显式事务）遇到死锁/锁等待超时可安全重试：
+                # MySQL 会回滚该语句，重试不会产生重复写入。
+                # 显式事务中绝不重试（服务端可能已回滚整个事务）。
+                if (code in (1213, 1205) and not self._tx_active
+                        and attempt <= _DEADLOCK_RETRY_LIMIT):
+                    _logger.warning(
+                        "检测到%s，第 %d 次重试: %s",
+                        "死锁" if code == 1213 else "锁等待超时",
+                        attempt, sql[:120],
+                    )
+                    time.sleep(0.01 * attempt)
+                    continue
+                raise
         elapsed_ms = (time.monotonic() - start) * 1000
-        if elapsed_ms >= DB_SLOW_QUERY_MS:
-            head = " ".join(str(sql).split())[:120]
-            _logger.warning("慢查询 %.0fms: %s", elapsed_ms, head)
+        self._last_used = time.monotonic()
+        _log_slow_query(sql, elapsed_ms)
+        return CursorWrapper(cursor)
+
+    def _ensure_alive(self):
+        idle = time.monotonic() - self._last_used
+        if idle > MYSQL_PING_IDLE_SECONDS:
+            try:
+                self._conn.ping(reconnect=True)
+            except Exception as exc:
+                raise DatabaseError(f"数据库连接已失效且无法重连: {exc}") from exc
+
+    def _reconnect(self) -> bool:
+        try:
+            self._conn.ping(reconnect=True)
+            return True
+        except Exception:
+            return False
+
+    def begin(self):
+        """显式开启事务（autocommit=True 时的多语句原子操作入口）。"""
+        self._conn.begin()
+        self._tx_active = True
+        self._last_used = time.monotonic()
+
+    def commit(self):
+        self._conn.commit()
+        self._tx_active = False
+        self._last_used = time.monotonic()
+
+    def rollback(self):
+        try:
+            self._conn.rollback()
+        except Exception:
+            pass
+        self._tx_active = False
+        self._last_used = time.monotonic()
+
+    def close(self):
+        self._closed = True
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+
+    def raw(self):
+        """返回底层驱动连接（仅供工具类脚本使用，业务代码不要使用）。"""
+        return self._conn
 
 
-def _apply_pragmas(conn: sqlite3.Connection) -> None:
-    """统一连接 PRAGMA；每个新连接只执行一次。"""
-    # WAL：多读单写、读写不互斥。journal_mode 是数据库文件的持久属性，
-    # 只有真正需要切换时才写（切换需要写锁，多 worker 冷启动时避免无谓争锁）。
-    try:
-        current = conn.execute("PRAGMA journal_mode").fetchone()[0]
-    except sqlite3.Error:
-        current = None
-    if str(current).lower() != "wal":
-        conn.execute("PRAGMA journal_mode=WAL")
-    # 外键约束：likes.image_id 依赖 images(id) ON DELETE CASCADE
-    conn.execute("PRAGMA foreign_keys=ON")
-    # 锁等待上限：超时抛出 OperationalError，由调用方决定重试或报错
-    conn.execute(f"PRAGMA busy_timeout={int(DB_BUSY_TIMEOUT_MS)}")
-    # 持久性：默认 FULL（WAL 下每次提交 fsync WAL），不静默降低保障
-    conn.execute(f"PRAGMA synchronous={DB_SYNCHRONOUS}")
-    # 临时表与排序器使用内存，减少磁盘临时文件
-    conn.execute("PRAGMA temp_store=MEMORY")
-    if DB_WAL_AUTOCHECKPOINT_PAGES > 0:
-        conn.execute(
-            f"PRAGMA wal_autocheckpoint={int(DB_WAL_AUTOCHECKPOINT_PAGES)}"
+def _log_slow_query(sql: str, elapsed_ms: float):
+    from app.config import DB_SLOW_QUERY_MS
+
+    if DB_SLOW_QUERY_MS > 0 and elapsed_ms > DB_SLOW_QUERY_MS:
+        _logger.warning(
+            "慢查询 %.1fms: %s", elapsed_ms, sql[:300]
         )
 
 
-def _connect() -> sqlite3.Connection:
-    # TEST 场景会替换 DATABASE_PATH，因此这里读取模块级变量而不是配置常量
-    path = DATABASE_PATH
-    parent = os.path.dirname(os.path.abspath(path))
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    conn = sqlite3.connect(
-        path,
-        timeout=DB_BUSY_TIMEOUT_MS / 1000.0,
-        check_same_thread=False,
-        factory=_TimedConnection,
-    )
-    conn.row_factory = sqlite3.Row
-    _apply_pragmas(conn)
-    with _conn_lock:
-        _all_conns.add(conn)
+# ── 连接池 ───────────────────────────────────────────────────────────
+
+
+class _ConnectionPool:
+    """简单连接池：常驻 MYSQL_POOL_SIZE，可溢出至 SIZE+MAX_OVERFLOW 总量。
+
+    闲置连接放入 LifoQueue 复用；超出上限时阻塞等待其他线程归还。
+    """
+
+    def __init__(self):
+        self._idle: queue.LifoQueue = queue.LifoQueue()
+        self._lock = threading.Lock()
+        self._created = 0
+
+    def _max_total(self) -> int:
+        return MYSQL_POOL_SIZE + MYSQL_POOL_MAX_OVERFLOW
+
+    def _new_connection(self):
+        return pymysql.connect(
+            host=MYSQL_HOST,
+            port=MYSQL_PORT,
+            user=MYSQL_USER,
+            password=MYSQL_PASSWORD,
+            database=MYSQL_DATABASE,
+            charset=MYSQL_CHARSET,
+            collation=MYSQL_COLLATION,
+            autocommit=True,
+            cursorclass=DictCursor,
+            connect_timeout=10,
+        )
+
+    def checkout(self):
+        deadline = time.monotonic() + MYSQL_POOL_TIMEOUT
+        while True:
+            try:
+                conn = self._idle.get_nowait()
+                return conn
+            except queue.Empty:
+                pass
+            with self._lock:
+                if self._created < self._max_total():
+                    self._created += 1
+                    try:
+                        conn = ConnectionWrapper(self._new_connection())
+                        conn._pooled = True
+                        return conn
+                    except Exception:
+                        self._created -= 1
+                        raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise DatabaseError(
+                    "数据库连接池已耗尽：请在低峰期重试，或调大 MYSQL_POOL_SIZE / "
+                    "MYSQL_POOL_MAX_OVERFLOW（注意不超过 MySQL 的 max_connections）。"
+                )
+            try:
+                return self._idle.get(timeout=remaining)
+            except queue.Empty:
+                continue
+
+    def checkin(self, conn: ConnectionWrapper):
+        if conn._closed:
+            self._discard(conn)
+            return
+        try:
+            # 归还前回滚可能残留的事务，避免"带事务的连接"回到池里影响后续请求
+            conn.rollback()
+            conn._conn.ping(reconnect=False)
+            self._idle.put(conn)
+        except Exception:
+            self._discard(conn)
+
+    def _discard(self, conn: ConnectionWrapper):
+        """关闭连接并（仅一次）归还池容量计数。"""
+        with self._lock:
+            if conn._pooled:
+                conn._pooled = False
+                self._created -= 1
+        conn.close()
+
+    def reset(self):
+        """丢弃所有闲置连接（配置变更后调用；不影响正在使用的连接）。"""
+        while True:
+            try:
+                conn = self._idle.get_nowait()
+            except queue.Empty:
+                break
+            self._discard(conn)
+
+    def idle_count(self) -> int:
+        return self._idle.qsize()
+
+
+_POOL = _ConnectionPool()
+
+# 线程本地连接缓存：CLI 脚本、后台线程等无请求作用域的场景使用
+_local = threading.local()
+# 全部已签出的连接（用于 close_all_db 收尾）
+_all_wrappers: set = set()
+_all_lock = threading.Lock()
+
+# 请求级连接作用域：由 HTTP 中间件建立（见 app/middleware.py: DBConnectionMiddleware）。
+# 这里用可变 holder 对象而不是直接存连接：同步路由在线程池线程执行，
+# contextvars 会以副本形式带入工作线程，但工作线程内的赋值不会回传；
+# holder 对象本身是共享引用，因此工作线程签出的连接能被事件循环里的中间件收尾归还。
+_request_holder = contextvars.ContextVar("amig_request_db", default=None)
+
+
+class _RequestHolder:
+    __slots__ = ("conn",)
+
+    def __init__(self):
+        self.conn = None
+
+
+def begin_request_scope():
+    """建立请求级连接作用域，返回 (holder, token)，交给中间件收尾。"""
+    holder = _RequestHolder()
+    return holder, _request_holder.set(holder)
+
+
+def end_request_scope(holder, token):
+    """请求结束时归还连接并撤销作用域（异常路径也必须调用）。"""
+    try:
+        conn = holder.conn
+        holder.conn = None
+        _release_connection(conn)
+    finally:
+        try:
+            _request_holder.reset(token)
+        except ValueError:
+            # token 已在其他上下文重置，忽略即可
+            pass
+
+
+def _checkout():
+    conn = _POOL.checkout()
+    with _all_lock:
+        _all_wrappers.add(conn)
     return conn
 
 
-def get_db() -> sqlite3.Connection:
-    """获取当前线程独占的数据库连接（不存在则创建）。
+def _release_connection(conn):
+    if conn is None:
+        return
+    with _all_lock:
+        _all_wrappers.discard(conn)
+    _POOL.checkin(conn)
 
-    连接保存在 threading.local 中，不会跨线程共享；工作线程复用以避免
-    每个请求重新建连，线程结束或显式 close_db() 时释放。
 
-    这里用连接注册表判断连接是否已被 close_all_db() 关闭，而不是每次执行
-    ``SELECT 1`` 探活：后者会让每个模型函数都多一次 SQL 往返（前台单页
-    可累积近十条），而注册表检查是内存操作且同样能发现已关闭连接。
-    """
-    conn = getattr(_local, "conn", None)
-    if conn is not None:
-        with _conn_lock:
-            alive = conn in _all_conns
-        if alive:
+# ── 对外接口 ─────────────────────────────────────────────────────────
+
+
+def get_db() -> ConnectionWrapper:
+    """获取当前请求（或当前线程）的数据库连接，需要时从连接池签出。"""
+    holder = _request_holder.get()
+    if holder is not None:
+        conn = holder.conn
+        if conn is not None and not conn._closed:
             return conn
-        _local.conn = None
-    _local.conn = _connect()
-    return _local.conn
+        if conn is not None:
+            # 连接已失效：丢弃后重新签出
+            _POOL._discard(conn)
+            with _all_lock:
+                _all_wrappers.discard(conn)
+        holder.conn = _checkout()
+        return holder.conn
 
-
-def _close_conn(conn):
-    try:
-        conn.close()
-    except sqlite3.Error:
-        pass
-    with _conn_lock:
-        _all_conns.discard(conn)
+    conn = getattr(_local, "conn", None)
+    if conn is not None and not conn._closed:
+        return conn
+    if conn is not None:
+        _POOL._discard(conn)
+        with _all_lock:
+            _all_wrappers.discard(conn)
+    conn = _checkout()
+    _local.conn = conn
+    return conn
 
 
 def close_db():
-    """关闭当前线程的数据库连接。"""
+    """归还当前请求/线程的数据库连接（可重复调用）。"""
+    holder = _request_holder.get()
+    if holder is not None:
+        conn = holder.conn
+        holder.conn = None
+        _release_connection(conn)
+        _local.tx_depth = 0
+        return
+
     conn = getattr(_local, "conn", None)
     if conn is not None:
-        _close_conn(conn)
         _local.conn = None
+        _local.tx_depth = 0
+        _release_connection(conn)
 
 
 def close_all_db():
-    """关闭所有线程创建的连接（进程退出/数据库替换前调用）。
+    """关闭全部已签出的连接并重置连接池（应用关闭或测试收尾时调用）。"""
+    with _all_lock:
+        wrappers = list(_all_wrappers)
+        _all_wrappers.clear()
+    for conn in wrappers:
+        _POOL._discard(conn)
+    _POOL.reset()
 
-    只有本进程创建的连接会被关闭；其他进程的连接由 busy_timeout 与
-    恢复工具的独占检测负责。
-    """
-    with _conn_lock:
-        conns = list(_all_conns)
-        _all_conns.clear()
-    for conn in conns:
-        try:
-            conn.close()
-        except sqlite3.Error:
-            pass
-    if getattr(_local, "conn", None) is not None:
-        _local.conn = None
+
+def _reset_pool():
+    """测试辅助：配置变更后重置连接池与线程本地缓存。"""
+    close_all_db()
+    _local.conn = None
+    _local.tx_depth = 0
 
 
 @contextlib.contextmanager
 def transaction():
-    """显式事务上下文：正常结束统一提交，异常统一回滚并向上抛出。
+    """事务上下文管理器，支持嵌套（内层用 SAVEPOINT）。
 
-    用于必须原子完成的多语句业务（如点赞：插入点赞行 + 计数 + 日统计）。
-    嵌套使用时通过 SAVEPOINT 实现，内层回滚不影响外层已完成的修改。
+    with transaction() as conn:
+        conn.execute(...)
+        conn.execute(...)
+    # 正常退出自动提交；异常自动回滚并抛出
     """
     conn = get_db()
     depth = getattr(_local, "tx_depth", 0)
     _local.tx_depth = depth + 1
     savepoint = f"sp_{depth}_{threading.get_ident()}"
-    if depth > 0:
-        conn.execute(f"SAVEPOINT {savepoint}")
+    outermost = depth == 0
     try:
+        if outermost:
+            conn.begin()
+        else:
+            conn.execute(f"SAVEPOINT {savepoint}")
         yield conn
-        if depth > 0:
-            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
-        else:
+        if outermost:
             conn.commit()
-    except Exception:
-        if depth > 0:
-            conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
-            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
         else:
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+    except BaseException:
+        if outermost:
             conn.rollback()
+        else:
+            try:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            except DatabaseError:
+                _logger.exception("回滚保存点失败")
         raise
     finally:
         _local.tx_depth = depth
 
 
-def checkpoint_wal(mode: str = "PASSIVE") -> dict:
-    """执行一次 WAL checkpoint（运维/备份工具调用，禁止在请求路径频繁执行）。"""
-    allowed = {"PASSIVE", "FULL", "RESTART", "TRUNCATE"}
-    if mode not in allowed:
-        raise ValueError(f"非法 checkpoint 模式: {mode}")
-    conn = get_db()
-    busy, log_frames, checkpointed = conn.execute(
-        f"PRAGMA wal_checkpoint({mode})"
-    ).fetchone()
-    result = {"busy": busy, "log_frames": log_frames, "checkpointed": checkpointed}
-    if busy:
-        _logger.warning("WAL checkpoint 未完成（有并发读写）: %s", result)
-    return result
+def run_in_transaction_with_retry(func, retries=_DEADLOCK_RETRY_LIMIT):
+    """在事务中执行 func(conn)，遇到死锁/锁等待超时时整体重试事务。
 
-
-def get_pragma_status() -> dict:
-    """只读返回当前连接的关键 PRAGMA 状态，供健康检查工具使用。"""
-    conn = get_db()
-
-    def scalar(pragma):
-        row = conn.execute(f"PRAGMA {pragma}").fetchone()
-        return row[0] if row is not None else None
-
-    return {
-        "sqlite_version": sqlite3.sqlite_version,
-        "journal_mode": scalar("journal_mode"),
-        "synchronous": scalar("synchronous"),
-        "busy_timeout": scalar("busy_timeout"),
-        "foreign_keys": scalar("foreign_keys"),
-        "temp_store": scalar("temp_store"),
-        "wal_autocheckpoint": scalar("wal_autocheckpoint"),
-        "user_version": scalar("user_version"),
-    }
-
-
-def _add_col_safe(conn, table, col_def):
-    """安全地为表添加列，忽略列已存在的错误。
-
-    col_def 形如 "ip TEXT NOT NULL DEFAULT ''"，即 ADD COLUMN 之后的完整定义。
+    死锁发生时 MySQL 会回滚整个事务，因此必须在事务边界重试（而不是重试单条
+    语句）。func 必须可重复执行（幂等或其内部已处理唯一约束冲突）。
     """
-    col_name = col_def.split()[0]
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            with transaction() as conn:
+                return func(conn)
+        except OperationalError as exc:
+            code = exc.args[0] if exc.args else None
+            if code in (1213, 1205) and attempt < retries:
+                _logger.warning(
+                    "事务执行遇到%s，第 %d 次整体重试",
+                    "死锁" if code == 1213 else "锁等待超时", attempt,
+                )
+                time.sleep(0.01 * attempt)
+                continue
+            raise
+
+
+def acquire_named_lock(conn: ConnectionWrapper, name: str, timeout: int) -> bool:
+    """获取 MySQL 命名互斥锁（用于「读-改-写」原子化），失败返回 False。
+
+    锁与连接绑定，必须与 release_named_lock 成对使用，异常路径也要释放。
+    """
+    row = conn.execute("SELECT GET_LOCK(%s, %s) AS locked", (name, timeout)).fetchone()
+    return row is not None and row["locked"] == 1
+
+
+def release_named_lock(conn: ConnectionWrapper, name: str):
+    conn.execute("SELECT RELEASE_LOCK(%s)", (name,))
+
+
+# ── 表结构初始化 ─────────────────────────────────────────────────────
+
+_SCHEMA_DDL = [
+    """
+    CREATE TABLE IF NOT EXISTS images (
+        id              INT AUTO_INCREMENT PRIMARY KEY,
+        filename        VARCHAR(255) NOT NULL,
+        thumb_filename  VARCHAR(255) NOT NULL DEFAULT '',
+        original_size   INT NOT NULL DEFAULT 0,
+        compressed_size INT NOT NULL DEFAULT 0,
+        width           INT NOT NULL DEFAULT 0,
+        height          INT NOT NULL DEFAULT 0,
+        description     TEXT NULL,
+        title           VARCHAR(200) NOT NULL DEFAULT '',
+        author          VARCHAR(100) NULL DEFAULT NULL,
+        content_md5     VARCHAR(64) NOT NULL DEFAULT '',
+        ip              VARCHAR(64) NOT NULL DEFAULT '',
+        ua              VARCHAR(512) NULL,
+        ua_hash         VARCHAR(64) NOT NULL DEFAULT '',
+        province        VARCHAR(64) NOT NULL DEFAULT '',
+        city            VARCHAR(64) NOT NULL DEFAULT '',
+        region          VARCHAR(128) NOT NULL DEFAULT '',
+        status          VARCHAR(16) NOT NULL DEFAULT 'pending',
+        reject_reason   TEXT NULL,
+        admin_edited    TINYINT NOT NULL DEFAULT 0,
+        created_at      VARCHAR(40) NOT NULL,
+        reviewed_at     VARCHAR(40) NULL DEFAULT NULL,
+        views           INT NOT NULL DEFAULT 0,
+        like_count      INT NOT NULL DEFAULT 0,
+        is_duplicate    TINYINT NOT NULL DEFAULT 0,
+        KEY idx_images_status (status),
+        KEY idx_images_reviewed_at (reviewed_at),
+        KEY idx_images_like_count (like_count),
+        KEY idx_images_content_md5 (content_md5),
+        KEY idx_images_created_at (created_at),
+        KEY idx_images_ip (ip),
+        KEY idx_images_ua_hash (ua_hash),
+        KEY idx_images_filename (filename),
+        KEY idx_images_thumb_filename (thumb_filename),
+        KEY idx_images_status_reviewed (status, reviewed_at),
+        KEY idx_images_status_created (status, created_at),
+        KEY idx_images_status_like (status, like_count)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS likes (
+        id          INT AUTO_INCREMENT PRIMARY KEY,
+        image_id    INT NOT NULL,
+        ip          VARCHAR(64) NOT NULL,
+        ua_hash     VARCHAR(64) NOT NULL,
+        province    VARCHAR(64) NOT NULL DEFAULT '',
+        city        VARCHAR(64) NOT NULL DEFAULT '',
+        created_at  VARCHAR(40) NOT NULL,
+        UNIQUE KEY idx_likes_fingerprint (image_id, ip, ua_hash),
+        KEY idx_likes_created_at (created_at),
+        KEY idx_likes_image_id (image_id),
+        KEY idx_likes_ip (ip),
+        KEY idx_likes_province (province),
+        KEY idx_likes_image_created (image_id, created_at),
+        CONSTRAINT fk_likes_image FOREIGN KEY (image_id)
+            REFERENCES images(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS ban_list (
+        id          INT AUTO_INCREMENT PRIMARY KEY,
+        target      VARCHAR(255) NOT NULL,
+        type        VARCHAR(16) NOT NULL,
+        reason      VARCHAR(500) NOT NULL DEFAULT '',
+        admin_id    INT NOT NULL,
+        created_at  VARCHAR(40) NOT NULL,
+        is_active   TINYINT NOT NULL DEFAULT 1,
+        KEY idx_ban_list_target (target),
+        KEY idx_ban_list_type (type)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS admins (
+        id              INT AUTO_INCREMENT PRIMARY KEY,
+        username        VARCHAR(64) NOT NULL UNIQUE,
+        password_hash   VARCHAR(128) NOT NULL,
+        login_attempts  INT NOT NULL DEFAULT 0,
+        locked_until    VARCHAR(40) NULL DEFAULT NULL,
+        created_at      VARCHAR(40) NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS sessions (
+        session_id   VARCHAR(64) PRIMARY KEY,
+        admin_id     INT NOT NULL,
+        username     VARCHAR(64) NOT NULL,
+        created_at   VARCHAR(40) NOT NULL,
+        expires_at   VARCHAR(40) NOT NULL,
+        csrf_token   VARCHAR(64) NOT NULL DEFAULT '',
+        last_seen_at VARCHAR(40) NOT NULL DEFAULT '',
+        KEY idx_sessions_expires_at (expires_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS login_rate_limits (
+        `key`         VARCHAR(100) PRIMARY KEY,
+        attempts      INT NOT NULL DEFAULT 0,
+        window_start  VARCHAR(40) NOT NULL,
+        updated_at    VARCHAR(40) NOT NULL,
+        KEY idx_login_rate_limits_window (window_start)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS settings (
+        `key`    VARCHAR(100) PRIMARY KEY,
+        value    TEXT NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS upload_reservations (
+        id          INT AUTO_INCREMENT PRIMARY KEY,
+        ip          VARCHAR(64) NOT NULL,
+        ua_hash     VARCHAR(64) NOT NULL,
+        created_at  VARCHAR(40) NOT NULL,
+        KEY idx_upload_reservations_ip (ip, created_at),
+        KEY idx_upload_reservations_created (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS pages (
+        id          INT AUTO_INCREMENT PRIMARY KEY,
+        slug        VARCHAR(100) NOT NULL UNIQUE,
+        title       VARCHAR(200) NOT NULL,
+        content     TEXT NULL,
+        sort_order  INT NOT NULL DEFAULT 0,
+        is_visible  TINYINT NOT NULL DEFAULT 1,
+        updated_at  VARCHAR(40) NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS friend_links (
+        id          INT AUTO_INCREMENT PRIMARY KEY,
+        name        VARCHAR(100) NOT NULL,
+        url         VARCHAR(500) NOT NULL,
+        sort_order  INT NOT NULL DEFAULT 0,
+        is_visible  TINYINT NOT NULL DEFAULT 1,
+        created_at  VARCHAR(40) NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS daily_stats (
+        `date`          VARCHAR(10) PRIMARY KEY,
+        upload_count    INT NOT NULL DEFAULT 0,
+        approved_count  INT NOT NULL DEFAULT 0,
+        rejected_count  INT NOT NULL DEFAULT 0,
+        like_count      INT NOT NULL DEFAULT 0,
+        view_count      INT NOT NULL DEFAULT 0
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS admin_logs (
+        id          INT AUTO_INCREMENT PRIMARY KEY,
+        admin_id    INT NOT NULL,
+        admin_name  VARCHAR(64) NOT NULL,
+        action      VARCHAR(50) NOT NULL,
+        detail      TEXT NULL,
+        target      VARCHAR(255) NOT NULL DEFAULT '',
+        ip          VARCHAR(64) NOT NULL DEFAULT '',
+        location    VARCHAR(128) NOT NULL DEFAULT '',
+        created_at  VARCHAR(40) NOT NULL,
+        KEY idx_admin_logs_created_at (created_at),
+        KEY idx_admin_logs_ip (ip),
+        KEY idx_admin_logs_action (action),
+        KEY idx_admin_logs_action_created (action, created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS view_sessions (
+        id          INT AUTO_INCREMENT PRIMARY KEY,
+        image_id    INT NOT NULL,
+        ip          VARCHAR(64) NOT NULL,
+        viewed_at   VARCHAR(40) NOT NULL,
+        UNIQUE KEY idx_view_sessions_unique (image_id, ip),
+        KEY idx_view_sessions_lookup (image_id, ip, viewed_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS cooling (
+        id                  INT AUTO_INCREMENT PRIMARY KEY,
+        ip                  VARCHAR(64) NOT NULL UNIQUE,
+        reject_count        INT NOT NULL DEFAULT 0,
+        cooldown_multiplier INT NOT NULL DEFAULT 1,
+        updated_at          VARCHAR(40) NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+        version     INT PRIMARY KEY,
+        applied_at  VARCHAR(40) NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+]
+
+EXPECTED_TABLES = (
+    "images", "likes", "ban_list", "admins", "sessions", "login_rate_limits",
+    "settings", "upload_reservations", "pages", "friend_links", "daily_stats",
+    "admin_logs", "view_sessions", "cooling", "schema_migrations",
+)
+
+
+def _validate_database_name(name: str):
+    if not name or not _IDENTIFIER_RE.match(name):
+        raise DatabaseError(f"MySQL 数据库名非法：{name!r}（仅允许字母数字与 _ $）")
+
+
+def _ensure_database():
+    """连接到 MySQL 服务器并确保目标库存在（utf8mb4）。"""
+    _validate_database_name(MYSQL_DATABASE)
+    conn = pymysql.connect(
+        host=MYSQL_HOST,
+        port=MYSQL_PORT,
+        user=MYSQL_USER,
+        password=MYSQL_PASSWORD,
+        charset=MYSQL_CHARSET,
+        autocommit=True,
+        connect_timeout=10,
+    )
     try:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
-    except sqlite3.OperationalError:
-        # 多 worker 并发启动或列已存在时均忽略
-        pass
+        with conn.cursor() as cur:
+            cur.execute(
+                f"CREATE DATABASE IF NOT EXISTS `{MYSQL_DATABASE}` "
+                f"CHARACTER SET {MYSQL_CHARSET} COLLATE {MYSQL_COLLATION}"
+            )
+    finally:
+        conn.close()
 
 
 def _applied_versions(conn) -> set:
-    try:
-        rows = conn.execute("SELECT version FROM schema_migrations").fetchall()
-    except sqlite3.OperationalError:
-        return set()
+    rows = conn.execute("SELECT version FROM schema_migrations").fetchall()
     return {int(r[0]) for r in rows}
 
 
 def _record_version(conn, version):
     conn.execute(
-        "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+        "INSERT IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
         (version, datetime.now(timezone.utc).isoformat(timespec="seconds")),
     )
 
 
-def _snapshot_before_migration(conn) -> str | None:
-    """迁移前把现有数据库快照到备份目录（使用 SQLite 备份 API，WAL 下一致）。
-
-    返回备份文件路径；跳过备份时返回 None。备份失败直接抛出，阻止在不完整
-    的数据库上继续执行结构变更。
-    """
-    if not DB_BACKUP_BEFORE_MIGRATION:
-        return None
-    try:
-        os.makedirs(BACKUP_DIR, exist_ok=True)
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        target = os.path.join(BACKUP_DIR, f"pre_migration_{stamp}_{os.getpid()}.db")
-        dest = sqlite3.connect(target)
-        try:
-            conn.backup(dest)
-        finally:
-            dest.close()
-        _logger.info("迁移前备份完成: %s", target)
-        return target
-    except (sqlite3.Error, OSError) as exc:
-        _logger.error("迁移前备份失败，已中止数据库迁移: %s", exc)
-        raise
-
-
-def _migrate_to_v5(conn):
-    """版本 5：浏览去重表收敛为 (image_id, ip) 唯一，防止并发重复计数。
-
-    历史数据中同一 image_id+ip 可能已有重复行，先保留最新一条再建唯一索引。
-    """
-    conn.execute(
-        "DELETE FROM view_sessions WHERE id NOT IN ("
-        "SELECT MAX(id) FROM view_sessions GROUP BY image_id, ip)"
-    )
-    conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_view_sessions_unique "
-        "ON view_sessions(image_id, ip)"
-    )
-
-
-def _migrate_to_v6(conn):
-    """版本 6：按实测查询计划补充两个复合索引。
-
-    1) idx_images_status_like (status, like_count)
-       「已通过 + 按点赞排序」是图库热度排序与后台排序的固定组合。旧计划
-       只能借 idx_images_status_created 过滤后再 TEMP B-TREE 排序；
-       在 3 万条 images 的合成库实测 20.01ms → 0.13ms。
-    2) idx_admin_logs_action_created (action, created_at)
-       后台日志按操作类型筛选并倒序分页。旧计划用 idx_admin_logs_action
-       过滤后仍需 TEMP B-TREE 排序；实测 5.82ms → 0.18ms。
-
-    实测中另外三个候选索引（ip+created_at、ua_hash+created_at、
-    content_md5+ip+created_at）对应用查询原本就已是毫秒级以内，收益不足
-    1ms 却要多占约 7MB 空间与写放大，因此不引入。
-    """
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_images_status_like "
-        "ON images(status, like_count)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_admin_logs_action_created "
-        "ON admin_logs(action, created_at)"
-    )
+def _init_db_once():
+    _ensure_database()
+    conn = get_db()
+    for ddl in _SCHEMA_DDL:
+        conn.execute(ddl)
+    applied = _applied_versions(conn)
+    with transaction():
+        for version in (4, 5, 6, SCHEMA_VERSION):
+            _record_version(conn, version)
 
 
 def init_db(max_wait_seconds=60.0):
-    """初始化数据库表结构；多 worker 同时启动时串行重试，避免启动失败。
+    """初始化数据库表结构；启动阶段连接不可用时重试至多 max_wait_seconds 秒。
 
-    实测多进程同时执行 DDL 时，SQLite 会对部分连接返回 database is locked，
-    导致 uvicorn 的部分 worker 启动失败。初始化逻辑本身是幂等的，因此对锁冲突
-    做指数退避重试；非锁错误仍然直接抛出。
+    多 worker 同时启动时，CREATE TABLE IF NOT EXISTS 幂等且 InnoDB DDL 自带
+    互斥，短暂冲突会以指数退避重试消化；真正的连接错误在超时后抛出。
     """
     deadline = time.monotonic() + max_wait_seconds
     delay = 0.1
@@ -348,297 +811,34 @@ def init_db(max_wait_seconds=60.0):
         try:
             _init_db_once()
             return
-        except sqlite3.OperationalError as exc:
+        except (OperationalError, DatabaseError) as exc:
             message = str(exc).lower()
-            if "locked" not in message and "busy" not in message:
+            transient = any(
+                kw in message
+                for kw in ("lock", "timeout", "timed out", "gone away", "refused", "can't connect")
+            )
+            if not transient or time.monotonic() >= deadline:
                 raise
-            # 丢弃可能仍处于事务/持锁状态的连接，下一轮重新打开
+            _logger.warning("数据库暂不可用（%s），%.1f 秒后重试...", exc, delay)
             close_db()
-            if time.monotonic() >= deadline:
-                raise
             time.sleep(delay)
             delay = min(delay * 2, 2.0)
 
 
-def _init_db_once():
-    """初始化数据库表结构
-
-    注意：为兼容老版本数据库（缺少 ip/ua_hash 等列），执行顺序必须严格为
-    「建表 → 补列迁移 → 建索引 → 记录 schema 版本」，否则 CREATE INDEX
-    会因列不存在而报错。
-    """
+def get_db_status() -> dict:
+    """数据库健康信息（check_db 工具使用）：版本、字符集、连接数等。"""
     conn = get_db()
-
-    # 已有数据库且结构版本落后时，先做一次一致性快照，再执行任何 DDL/迁移。
-    # 新建数据库（无任何表）不需要快照。
-    existing_tables = conn.execute(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='images'"
-    ).fetchone()[0]
-    pending_migration = False
-    if existing_tables:
-        applied = _applied_versions(conn)
-        # 版本表中没有记录（前三阶段的历史库）也视为需要迁移
-        pending_migration = SCHEMA_VERSION not in applied
-        if pending_migration:
-            _snapshot_before_migration(conn)
-
-    # ── 第一阶段：仅建表（不含索引） ──────────────────────────────────
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS images (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            filename        TEXT NOT NULL,
-            thumb_filename  TEXT NOT NULL,
-            original_size   INTEGER NOT NULL,
-            compressed_size INTEGER NOT NULL,
-            width           INTEGER NOT NULL,
-            height          INTEGER NOT NULL,
-            description     TEXT DEFAULT '',
-            title           TEXT DEFAULT '',
-            author          TEXT DEFAULT NULL,
-            content_md5     TEXT NOT NULL,
-            ip              TEXT NOT NULL,
-            ua              TEXT DEFAULT '',
-            ua_hash         TEXT NOT NULL,
-            province        TEXT DEFAULT '',
-            city            TEXT DEFAULT '',
-            region          TEXT DEFAULT '',
-            status          TEXT DEFAULT 'pending',
-            reject_reason   TEXT DEFAULT NULL,
-            admin_edited    INTEGER DEFAULT 0,
-            created_at      TEXT NOT NULL,
-            reviewed_at     TEXT DEFAULT NULL,
-            views           INTEGER DEFAULT 0,
-            like_count      INTEGER DEFAULT 0,
-            is_duplicate    INTEGER DEFAULT 0
-        );
-
-        CREATE TABLE IF NOT EXISTS likes (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            image_id    INTEGER NOT NULL,
-            ip          TEXT NOT NULL,
-            ua_hash     TEXT NOT NULL,
-            province    TEXT DEFAULT '',
-            city        TEXT DEFAULT '',
-            created_at  TEXT NOT NULL,
-            FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS ban_list (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            target      TEXT NOT NULL,
-            type        TEXT NOT NULL,
-            reason      TEXT NOT NULL,
-            admin_id    INTEGER NOT NULL,
-            created_at  TEXT NOT NULL,
-            is_active   INTEGER DEFAULT 1
-        );
-
-        CREATE TABLE IF NOT EXISTS admins (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            username        TEXT NOT NULL UNIQUE,
-            password_hash   TEXT NOT NULL,
-            login_attempts  INTEGER DEFAULT 0,
-            locked_until    TEXT DEFAULT NULL,
-            created_at      TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS sessions (
-            session_id  TEXT PRIMARY KEY,
-            admin_id    INTEGER NOT NULL,
-            username    TEXT NOT NULL,
-            created_at  TEXT NOT NULL,
-            expires_at  TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS login_rate_limits (
-            key          TEXT PRIMARY KEY,
-            attempts     INTEGER NOT NULL DEFAULT 0,
-            window_start TEXT NOT NULL,
-            updated_at   TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS settings (
-            key     TEXT PRIMARY KEY,
-            value   TEXT NOT NULL
-        );
-
-        -- 上传额度预约表：在“限额检查 + 额度占用”原子化事务中使用，
-        -- 记录尚未完成入库的上传请求（入库或失败后即删除该行）
-        CREATE TABLE IF NOT EXISTS upload_reservations (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            ip          TEXT NOT NULL,
-            ua_hash     TEXT NOT NULL,
-            created_at  TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS pages (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            slug        TEXT NOT NULL UNIQUE,
-            title       TEXT NOT NULL,
-            content     TEXT DEFAULT '',
-            sort_order  INTEGER DEFAULT 0,
-            is_visible  INTEGER DEFAULT 1,
-            updated_at  TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS friend_links (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            name        TEXT NOT NULL,
-            url         TEXT NOT NULL,
-            sort_order  INTEGER DEFAULT 0,
-            is_visible  INTEGER DEFAULT 1,
-            created_at  TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS daily_stats (
-            date            TEXT PRIMARY KEY,
-            upload_count    INTEGER DEFAULT 0,
-            approved_count  INTEGER DEFAULT 0,
-            rejected_count  INTEGER DEFAULT 0,
-            like_count      INTEGER DEFAULT 0,
-            view_count      INTEGER DEFAULT 0
-        );
-
-        CREATE TABLE IF NOT EXISTS admin_logs (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            admin_id    INTEGER NOT NULL,
-            admin_name  TEXT NOT NULL,
-            action      TEXT NOT NULL,
-            detail      TEXT DEFAULT '',
-            target      TEXT DEFAULT '',
-            ip          TEXT DEFAULT '',
-            location    TEXT DEFAULT '',
-            created_at  TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS view_sessions (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            image_id    INTEGER NOT NULL,
-            ip          TEXT NOT NULL,
-            viewed_at   TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS cooling (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            ip          TEXT NOT NULL UNIQUE,
-            reject_count INTEGER DEFAULT 0,
-            cooldown_multiplier INTEGER DEFAULT 1,
-            updated_at  TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS schema_migrations (
-            version     INTEGER PRIMARY KEY,
-            applied_at  TEXT NOT NULL
-        );
-    """)
-
-    # ── 第二阶段：补列迁移（必须在建索引之前完成） ──────────────────────
-
-    # images 表：兼容更早期版本中缺失的基础字段
-    img_cols = {r["name"] for r in conn.execute("PRAGMA table_info(images)").fetchall()}
-    img_missing = [
-        # (列名, ADD COLUMN 定义)
-        ("content_md5", "content_md5 TEXT NOT NULL DEFAULT ''"),
-        ("ip",          "ip TEXT NOT NULL DEFAULT ''"),
-        ("ua",          "ua TEXT DEFAULT ''"),
-        ("ua_hash",     "ua_hash TEXT NOT NULL DEFAULT ''"),
-        ("province",    "province TEXT DEFAULT ''"),
-        ("city",        "city TEXT DEFAULT ''"),
-        ("title",       "title TEXT DEFAULT ''"),
-        ("region",      "region TEXT DEFAULT ''"),
-        ("status",      "status TEXT DEFAULT 'pending'"),
-        ("reject_reason", "reject_reason TEXT DEFAULT NULL"),
-        ("admin_edited",  "admin_edited INTEGER DEFAULT 0"),
-        ("reviewed_at",   "reviewed_at TEXT DEFAULT NULL"),
-        ("views",         "views INTEGER DEFAULT 0"),
-        ("like_count",    "like_count INTEGER DEFAULT 0"),
-        ("is_duplicate",  "is_duplicate INTEGER DEFAULT 0"),
-    ]
-    for name, defn in img_missing:
-        if name not in img_cols:
-            _add_col_safe(conn, "images", defn)
-
-    # admin_logs 表
-    log_cols = {r["name"] for r in conn.execute("PRAGMA table_info(admin_logs)").fetchall()}
-    for name, defn in [
-        ("ip",       "ip TEXT DEFAULT ''"),
-        ("location", "location TEXT DEFAULT ''"),
-    ]:
-        if name not in log_cols:
-            _add_col_safe(conn, "admin_logs", defn)
-
-    # sessions 表：第二阶段新增“服务端 CSRF 令牌”和“最近活动时间”（空闲超时）
-    sess_cols = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()}
-    if "csrf_token" not in sess_cols:
-        _add_col_safe(conn, "sessions", "csrf_token TEXT DEFAULT ''")
-    if "last_seen_at" not in sess_cols:
-        _add_col_safe(conn, "sessions", "last_seen_at TEXT DEFAULT ''")
-    # 旧会话没有活动时间时用创建时间回填，避免升级后立刻全部失效。
-    # 兼容多 worker 同时启动：极少数情况下列刚由其他进程添加，忽略此处迁移失败，
-    # 会话在首次访问时仍会惰性补齐 CSRF/活动时间。
-    try:
-        conn.execute(
-            "UPDATE sessions SET last_seen_at=created_at "
-            "WHERE last_seen_at='' OR last_seen_at IS NULL"
-        )
-    except sqlite3.OperationalError:
-        pass
-
-    conn.commit()
-
-    # ── 第三阶段：建索引（此时所有列均已存在） ──────────────────────────
-    conn.executescript("""
-        CREATE INDEX IF NOT EXISTS idx_images_status ON images(status);
-        CREATE INDEX IF NOT EXISTS idx_images_reviewed_at ON images(reviewed_at);
-        CREATE INDEX IF NOT EXISTS idx_images_like_count ON images(like_count);
-        CREATE INDEX IF NOT EXISTS idx_images_content_md5 ON images(content_md5);
-        CREATE INDEX IF NOT EXISTS idx_images_created_at ON images(created_at);
-        CREATE INDEX IF NOT EXISTS idx_images_ip ON images(ip);
-        CREATE INDEX IF NOT EXISTS idx_images_ua_hash ON images(ua_hash);
-        CREATE INDEX IF NOT EXISTS idx_images_filename ON images(filename);
-        CREATE INDEX IF NOT EXISTS idx_images_thumb_filename ON images(thumb_filename);
-        CREATE INDEX IF NOT EXISTS idx_images_status_reviewed ON images(status, reviewed_at);
-        CREATE INDEX IF NOT EXISTS idx_images_status_created ON images(status, created_at);
-
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_likes_fingerprint ON likes(image_id, ip, ua_hash);
-        CREATE INDEX IF NOT EXISTS idx_likes_created_at ON likes(created_at);
-        CREATE INDEX IF NOT EXISTS idx_likes_image_id ON likes(image_id);
-        CREATE INDEX IF NOT EXISTS idx_likes_ip ON likes(ip);
-        CREATE INDEX IF NOT EXISTS idx_likes_province ON likes(province);
-        CREATE INDEX IF NOT EXISTS idx_likes_image_created ON likes(image_id, created_at);
-
-        CREATE INDEX IF NOT EXISTS idx_ban_list_target ON ban_list(target);
-        CREATE INDEX IF NOT EXISTS idx_ban_list_type ON ban_list(type);
-
-        CREATE INDEX IF NOT EXISTS idx_admin_logs_created_at ON admin_logs(created_at);
-        CREATE INDEX IF NOT EXISTS idx_admin_logs_ip ON admin_logs(ip);
-        CREATE INDEX IF NOT EXISTS idx_admin_logs_action ON admin_logs(action);
-
-        CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
-        CREATE INDEX IF NOT EXISTS idx_login_rate_limits_window ON login_rate_limits(window_start);
-
-        CREATE INDEX IF NOT EXISTS idx_view_sessions_lookup ON view_sessions(image_id, ip, viewed_at);
-
-        CREATE INDEX IF NOT EXISTS idx_upload_reservations_ip ON upload_reservations(ip, created_at);
-        CREATE INDEX IF NOT EXISTS idx_upload_reservations_created ON upload_reservations(created_at);
-    """)
-
-    # ── 第四阶段：按版本执行结构迁移，并记录 schema 版本 ─────────────────
-    # 每个版本的迁移必须是幂等的，允许多 worker 同时启动时重复执行。
-    applied = _applied_versions(conn)
-    if 5 not in applied:
-        with transaction():
-            _migrate_to_v5(conn)
-            _record_version(conn, 5)
-        _logger.info("数据库迁移到版本 5 完成")
-    if 6 not in applied:
-        with transaction():
-            _migrate_to_v6(conn)
-            _record_version(conn, 6)
-        _logger.info("数据库迁移到版本 6 完成")
-    # 兼容历史库：版本表中没有 4 的记录时补一条（结构已由上面的 DDL 保证）
-    with transaction():
-        _record_version(conn, 4)
-        _record_version(conn, SCHEMA_VERSION)
-    if pending_migration:
-        _logger.info("数据库结构已升级到版本 %s", SCHEMA_VERSION)
+    version = conn.execute("SELECT VERSION() AS v").fetchone()["v"]
+    charset_row = conn.execute(
+        "SELECT @@character_set_database AS cs, @@collation_database AS co"
+    ).fetchone()
+    max_conn = conn.execute("SELECT @@max_connections AS mc").fetchone()["mc"]
+    threads = conn.execute("SHOW STATUS LIKE 'Threads_connected'").fetchall()
+    return {
+        "server_version": version,
+        "charset": charset_row["cs"],
+        "collation": charset_row["co"],
+        "max_connections": max_conn,
+        "threads_connected": threads[0]["Value"] if threads else None,
+        "pool_idle": _POOL.idle_count(),
+    }

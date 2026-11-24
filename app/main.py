@@ -12,8 +12,11 @@ from app.config import (
     log_deployment_warnings,
 )
 from app.admin_domains import ensure_admin_domain_initialized
-from app.database import init_db, close_all_db, checkpoint_wal
-from app.middleware import AdminDomainMiddleware, CSRFMiddleware, SecurityHeadersMiddleware, UploadBodyLimitMiddleware, load_sensitive_words
+from app.database import init_db, close_all_db
+from app.middleware import (
+    AdminDomainMiddleware, CSRFMiddleware, DBConnectionMiddleware,
+    SecurityHeadersMiddleware, UploadBodyLimitMiddleware, load_sensitive_words,
+)
 from app.display import safe_color
 from app.routes import front, admin, api, media
 
@@ -37,8 +40,11 @@ app = FastAPI(
 app.add_middleware(AdminDomainMiddleware)
 app.add_middleware(CSRFMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
-# 最外层：上传请求体大小与并发限制，必须在 multipart 解析阶段之前生效
+# 上传请求体大小与并发限制，必须在 multipart 解析阶段之前生效
 app.add_middleware(UploadBodyLimitMiddleware)
+# 最外层：按请求建立/归还数据库连接。放在最外层是为了让管理域名校验等
+# 中间件里的数据库读取也处于同一作用域内，避免连接挂在线程上不归还。
+app.add_middleware(DBConnectionMiddleware)
 
 # Mount static files
 class CachedStaticFiles(StaticFiles):
@@ -101,12 +107,8 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
-    # 正常退出前做一次 checkpoint，把 WAL 内容合并回主库，避免 -wal 文件长期增长；
-    # 随后关闭本进程创建的所有线程连接（线程池连接不会走请求级清理）。
-    try:
-        checkpoint_wal("TRUNCATE")
-    except Exception:  # 退出阶段失败不应阻断进程关闭
-        logging.getLogger(__name__).warning("退出前 WAL checkpoint 失败", exc_info=True)
+    # 关闭本进程签出的所有数据库连接并把连接池清空
+    #（线程池连接不会走请求级清理）。
     close_all_db()
     print("[INFO] Application stopped")
 

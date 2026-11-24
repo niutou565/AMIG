@@ -106,7 +106,7 @@ def scan_uploads(older_than_days=7, now=None):
     # 站点 Logo 也属于有效文件，避免清理时误删（即使将来 Logo 命名规则变化）
     for key in ("logo_large", "logo_small"):
         row = get_db().execute(
-            "SELECT value FROM settings WHERE key=?", (key,)
+            "SELECT value FROM settings WHERE `key`=?", (key,)
         ).fetchone()
         if row and row["value"]:
             referenced.add(str(row["value"]).replace("\\", "/"))

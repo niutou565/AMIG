@@ -29,7 +29,7 @@ SESSION_CLEANUP_INTERVAL = 600
 _last_session_cleanup = 0.0
 _session_cleanup_lock = threading.Lock()
 
-# 最近活动时间写入节流：同一会话 60 秒内最多写一次，降低 SQLite 写压力
+# 最近活动时间写入节流：同一会话 60 秒内最多写一次，降低数据库写压力
 _SESSION_TOUCH_INTERVAL = 60
 _session_touch = {}  # session_id -> monotonic time
 _session_touch_lock = threading.Lock()
@@ -241,7 +241,7 @@ def is_login_ip_blocked(ip: str) -> bool:
     now = datetime.now(timezone.utc)
     cutoff = _rate_window_start(now).isoformat(timespec="seconds")
     row = get_db().execute(
-        "SELECT attempts, window_start FROM login_rate_limits WHERE key=?",
+        "SELECT attempts, window_start FROM login_rate_limits WHERE `key`=?",
         (_rate_key(ip),),
     ).fetchone()
     if not row:
@@ -271,19 +271,19 @@ def record_login_failure(ip: str) -> bool:
     # 顺手清理过期记录，避免表无限增长
     db.execute("DELETE FROM login_rate_limits WHERE window_start <= ?", (cutoff,))
     db.execute(
-        "INSERT INTO login_rate_limits (key, attempts, window_start, updated_at) "
+        "INSERT INTO login_rate_limits (`key`, attempts, window_start, updated_at) "
         "VALUES (?, 1, ?, ?) "
-        "ON CONFLICT(key) DO UPDATE SET "
+        "ON DUPLICATE KEY UPDATE "
         "attempts = CASE WHEN login_rate_limits.window_start >= ? "
         "          THEN login_rate_limits.attempts + 1 ELSE 1 END, "
         "window_start = CASE WHEN login_rate_limits.window_start >= ? "
-        "          THEN login_rate_limits.window_start ELSE excluded.window_start END, "
-        "updated_at = excluded.updated_at",
+        "          THEN login_rate_limits.window_start ELSE VALUES(window_start) END, "
+        "updated_at = VALUES(updated_at)",
         (key, now_iso_value, now_iso_value, cutoff, cutoff),
     )
     db.commit()
     row = db.execute(
-        "SELECT attempts FROM login_rate_limits WHERE key=?", (key,)
+        "SELECT attempts FROM login_rate_limits WHERE `key`=?", (key,)
     ).fetchone()
     attempts = int(row["attempts"]) if row else 1
     return attempts >= LOGIN_IP_MAX_ATTEMPTS
@@ -294,7 +294,7 @@ def reset_login_ip_limit(ip: str) -> None:
     if not ip:
         return
     db = get_db()
-    db.execute("DELETE FROM login_rate_limits WHERE key=?", (_rate_key(ip),))
+    db.execute("DELETE FROM login_rate_limits WHERE `key`=?", (_rate_key(ip),))
     db.commit()
 
 

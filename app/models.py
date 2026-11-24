@@ -1,12 +1,14 @@
 import hashlib
 import logging
 import re
-import sqlite3
 import time
 import uuid
 import contextvars
 from datetime import datetime, timezone, timedelta
-from app.database import get_db
+from app.database import (
+    get_db, transaction, IntegrityError, DatabaseError,
+    acquire_named_lock, release_named_lock,
+)
 from app.config import VIEW_DEDUP_WINDOW
 
 _logger = logging.getLogger(__name__)
@@ -128,7 +130,7 @@ def count_images_total():
 
 
 def get_random_approved_images(limit=12):
-    """随机获取已通过图片，避免 ORDER BY RANDOM()"""
+    """随机获取已通过图片，避免 ORDER BY RAND()"""
     db = get_db()
     total = count_images_by_status("approved")
     if total == 0:
@@ -156,7 +158,7 @@ def get_latest_approved_images(limit=12):
 def get_random_image_prefer_low_heat(exclude_id=None):
     """随机返回一张已通过图片，权重向热度（点赞数）较低的图片倾斜。
 
-    加权抽样在 SQLite 端完成（仅返回一行），避免把全部图片记录加载到
+    加权抽样在 MySQL 端完成（仅返回一行），避免把全部图片记录加载到
     Python 内存中。权重 = 1/(like_count+1)，用均匀随机数的倒数做竞速排序。
     """
     db = get_db()
@@ -168,7 +170,7 @@ def get_random_image_prefer_low_heat(exclude_id=None):
     row = db.execute(
         f"""SELECT id FROM images WHERE {condition}
             ORDER BY (COALESCE(like_count, 0) + 1) /
-                     ((ABS(RANDOM() % 1000000007) + 1) / 1000000008.0)
+                     ((FLOOR(RAND() * 1000000007) + 1) / 1000000008.0)
             ASC LIMIT 1""",
         params
     ).fetchone()
@@ -204,19 +206,21 @@ def split_search_terms(q):
 
 
 def _like_pattern(text):
-    """把关键词转成 LIKE 模式，并转义 % _ \\ 三个通配/转义字符。
+    """把关键词转成 LIKE 模式，并转义 ! % _ 三个通配/转义字符。
 
-    必须配合 SQL 中的 ESCAPE '\\' 使用，否则用户输入 "%" 会匹配全部记录。
+    必须配合 SQL 中的 ESCAPE '!' 使用，否则用户输入 "%" 会匹配全部记录。
+    使用 "!" 作为转义符而不用反斜杠，是为了避免 MySQL 字符串字面量把
+    反斜杠当作转义符（NO_BACKSLASH_ESCAPES 模式下行为还会变化）。
     """
-    escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    escaped = text.replace("!", "!!").replace("%", "!%").replace("_", "!_")
     return f"%{escaped}%"
 
 
 def _multi_term_condition(patterns):
     """多关键词的 AND 条件：每个词都必须命中标题/简介/署名之一。"""
     return " AND ".join(
-        "(title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\' "
-        "OR author LIKE ? ESCAPE '\\')"
+        "(title LIKE ? ESCAPE '!' OR description LIKE ? ESCAPE '!' "
+        "OR author LIKE ? ESCAPE '!')"
         for _ in patterns
     )
 
@@ -237,9 +241,9 @@ def search_approved_images(query, limit=24, offset=0):
         patterns = [_like_pattern(term) for term in terms]
         # 相关度：标题命中词数多的优先；有署名命中的排在仅简介命中之前
         title_hits = " + ".join(
-            "CASE WHEN title LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END" for _ in patterns
+            "CASE WHEN title LIKE ? ESCAPE '!' THEN 1 ELSE 0 END" for _ in patterns
         )
-        author_hit = " OR ".join("author LIKE ? ESCAPE '\\'" for _ in patterns)
+        author_hit = " OR ".join("author LIKE ? ESCAPE '!'" for _ in patterns)
         sql = (
             f"SELECT * FROM images WHERE status='approved' "
             f"AND {_multi_term_condition(patterns)} "
@@ -259,12 +263,12 @@ def search_approved_images(query, limit=24, offset=0):
     # 并以 id 兜底，保证同一审核时间（批量通过）下翻页不会重复或漏行。
     return db.execute(
         """SELECT * FROM images WHERE status='approved'
-           AND (title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\'
-                OR author LIKE ? ESCAPE '\\')
+           AND (title LIKE ? ESCAPE '!' OR description LIKE ? ESCAPE '!'
+                OR author LIKE ? ESCAPE '!')
            ORDER BY
              CASE
-               WHEN title LIKE ? ESCAPE '\\' THEN 3
-               WHEN author LIKE ? ESCAPE '\\' THEN 2
+               WHEN title LIKE ? ESCAPE '!' THEN 3
+               WHEN author LIKE ? ESCAPE '!' THEN 2
                ELSE 1
              END DESC,
              reviewed_at DESC, id DESC
@@ -292,8 +296,8 @@ def count_search_approved_images(query):
     pattern = _like_pattern(q)
     return db.execute(
         """SELECT COUNT(*) FROM images WHERE status='approved'
-           AND (title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\'
-                OR author LIKE ? ESCAPE '\\')""",
+           AND (title LIKE ? ESCAPE '!' OR description LIKE ? ESCAPE '!'
+                OR author LIKE ? ESCAPE '!')""",
         (pattern, pattern, pattern)
     ).fetchone()[0]
 
@@ -424,7 +428,7 @@ def increment_like_count(image_id):
 def decrement_like_count(image_id, count=1):
     db = get_db()
     db.execute(
-        "UPDATE images SET like_count = MAX(0, like_count - ?) WHERE id=?",
+        "UPDATE images SET like_count = GREATEST(0, like_count - ?) WHERE id=?",
         (count, image_id)
     )
     db.commit()
@@ -463,7 +467,7 @@ def insert_like(image_id, ip, ua_hash_val, province, city):
         )
         db.commit()
         return True
-    except sqlite3.IntegrityError:
+    except IntegrityError:
         # 唯一索引冲突：同一 IP + UA 已赞过。
         # 必须回滚，否则线程本地连接上会残留未结束的写事务并长期持有写锁。
         db.rollback()
@@ -474,30 +478,34 @@ def add_like_atomic(image_id, ip, ua_hash_val, province, city, date_str=None):
     """点赞写库的原子版本：点赞行、图片计数、日统计在同一事务内提交。
 
     任何一步失败都会整体回滚，避免“有点赞行但计数没增加”之类的漂移。
-    唯一索引冲突（重复点赞）时回滚 SAVEPOINT 并返回 False，不影响连接上的其他操作。
+    唯一索引冲突（重复点赞）时返回 False，不影响连接上的其他操作；
+    并发写入出现死锁时由 run_in_transaction_with_retry 整体重试事务。
     """
-    from app.database import transaction
+    from app.database import run_in_transaction_with_retry
+
     if date_str is None:
         date_str = today_str()
-    db = get_db()
-    with transaction():
+
+    def _write(conn):
         try:
-            db.execute(
+            conn.execute(
                 "INSERT INTO likes (image_id, ip, ua_hash, province, city, created_at) "
                 "VALUES (?,?,?,?,?,?)",
                 (image_id, ip, ua_hash_val, province, city, now_iso())
             )
-        except sqlite3.IntegrityError:
+        except IntegrityError:
             return False
-        db.execute(
+        conn.execute(
             "UPDATE images SET like_count = like_count + 1 WHERE id=?", (image_id,)
         )
-        db.execute(
+        conn.execute(
             "INSERT INTO daily_stats (date, like_count) VALUES (?, 1) "
-            "ON CONFLICT(date) DO UPDATE SET like_count = like_count + 1",
+            "ON DUPLICATE KEY UPDATE like_count = like_count + 1",
             (date_str,),
         )
-    return True
+        return True
+
+    return run_in_transaction_with_retry(_write)
 
 
 def has_liked(image_id, ip, ua_hash_val):
@@ -540,21 +548,24 @@ def delete_likes_by_ids(like_ids):
     """
     if not like_ids:
         return
-    from app.database import transaction
-    db = get_db()
+    from app.database import run_in_transaction_with_retry
+
     id_list = ",".join("?" for _ in like_ids)
-    with transaction():
-        likes = db.execute(
+
+    def _delete(conn):
+        likes = conn.execute(
             f"SELECT image_id, COUNT(*) as cnt FROM likes WHERE id IN ({id_list}) "
             "GROUP BY image_id",
             like_ids
         ).fetchall()
-        db.execute(f"DELETE FROM likes WHERE id IN ({id_list})", like_ids)
+        conn.execute(f"DELETE FROM likes WHERE id IN ({id_list})", like_ids)
         for row in likes:
-            db.execute(
-                "UPDATE images SET like_count = MAX(0, like_count - ?) WHERE id=?",
+            conn.execute(
+                "UPDATE images SET like_count = GREATEST(0, like_count - ?) WHERE id=?",
                 (row["cnt"], row["image_id"]),
             )
+
+    run_in_transaction_with_retry(_delete)
 
 
 def count_likes_by_ip_last_minute(ip):
@@ -682,15 +693,16 @@ def update_admin_password(admin_id, password_hash):
 # ========== settings ==========
 
 def get_setting(key, default=None):
-    row = get_db().execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    row = get_db().execute("SELECT value FROM settings WHERE `key`=?", (key,)).fetchone()
     return row["value"] if row else default
 
 
 def set_setting(key, value):
     db = get_db()
     db.execute(
-        "INSERT INTO settings (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=?",
-        (key, str(value), str(value))
+        "INSERT INTO settings (`key`, value) VALUES (?,?) "
+        "ON DUPLICATE KEY UPDATE value = VALUES(value)",
+        (key, str(value))
     )
     db.commit()
 
@@ -801,7 +813,9 @@ def ensure_daily_stats(date_str=None):
         date_str = today_str()
     db = get_db()
     db.execute(
-        "INSERT OR IGNORE INTO daily_stats (date) VALUES (?)", (date_str,)
+        "INSERT INTO daily_stats (date) VALUES (?) "
+        "ON DUPLICATE KEY UPDATE date = date",
+        (date_str,),
     )
     db.commit()
 
@@ -818,7 +832,7 @@ def increment_daily_stat(date_str, field):
     # 字段名来自白名单校验，值用参数传递，不存在 SQL 注入面
     db.execute(
         f"INSERT INTO daily_stats (date, {field}) VALUES (?, 1) "
-        f"ON CONFLICT(date) DO UPDATE SET {field} = {field} + 1",
+        f"ON DUPLICATE KEY UPDATE {field} = {field} + 1",
         (date_str,),
     )
     db.commit()
@@ -904,14 +918,14 @@ def _admin_log_where(action=None, ip=None, query=None, date_from=None, date_to=N
         params.append(action)
     ip_text = normalize_search_query(ip)
     if ip_text:
-        conditions.append("ip LIKE ? ESCAPE '\\'")
+        conditions.append("ip LIKE ? ESCAPE '!'")
         params.append(_like_pattern(ip_text))
     q = normalize_search_query(query)
     if q:
         pattern = _like_pattern(q)
         conditions.append(
-            "(detail LIKE ? ESCAPE '\\' OR target LIKE ? ESCAPE '\\' "
-            "OR admin_name LIKE ? ESCAPE '\\')"
+            "(detail LIKE ? ESCAPE '!' OR target LIKE ? ESCAPE '!' "
+            "OR admin_name LIKE ? ESCAPE '!')"
         )
         params.extend([pattern, pattern, pattern])
     if date_from:
@@ -966,8 +980,8 @@ def should_count_view(image_id, ip):
         return False
     cursor = db.execute(
         "INSERT INTO view_sessions (image_id, ip, viewed_at) VALUES (?,?,?) "
-        "ON CONFLICT(image_id, ip) DO UPDATE SET viewed_at=excluded.viewed_at "
-        "WHERE view_sessions.viewed_at <= ?",
+        "ON DUPLICATE KEY UPDATE viewed_at = "
+        "IF(viewed_at <= ?, VALUES(viewed_at), viewed_at)",
         (image_id, ip, now_iso(), cutoff),
     )
     db.commit()
@@ -993,10 +1007,10 @@ def increment_reject_cooldown(ip):
     db.execute(
         "INSERT INTO cooling (ip, reject_count, cooldown_multiplier, updated_at) "
         "VALUES (?, 1, 1, ?) "
-        "ON CONFLICT(ip) DO UPDATE SET "
+        "ON DUPLICATE KEY UPDATE "
         "reject_count = reject_count + 1, "
-        "cooldown_multiplier = MIN(cooldown_multiplier * 2, 16), "
-        "updated_at = excluded.updated_at",
+        "cooldown_multiplier = LEAST(cooldown_multiplier * 2, 16), "
+        "updated_at = VALUES(updated_at)",
         (ip, now),
     )
     db.commit()
@@ -1088,10 +1102,10 @@ class _UploadLimitDenied(Exception):
 
 
 def reserve_upload_quota(ip, ua_hash_val):
-    """原子地检查并占用上传额度（检查与占用在同一写事务内完成）。
+    """原子地检查并占用上传额度（检查与占用在同一互斥区内完成）。
 
-    使用 BEGIN IMMEDIATE 串行化并发预约：同一时刻只有一个连接能执行
-    检查+插入，后续请求在锁上排队，提交后一定能读到先前请求占用的额度，
+    使用 MySQL 命名锁 GET_LOCK 串行化并发预约：同一时刻只有一个连接能执行
+    检查+插入，后续请求在锁上排队，锁释放后一定能读到先前请求占用的额度，
     因此高并发下也不会超额通过限流检查。
 
     预约成功后调用方必须在上传流程结束时（无论成败）调用
@@ -1102,13 +1116,12 @@ def reserve_upload_quota(ip, ua_hash_val):
     from app.config import (
         DEFAULT_UPLOAD_PER_IP, DEFAULT_UPLOAD_PER_UA,
         DEFAULT_UPLOAD_DAILY_TOTAL, DEFAULT_UPLOAD_INTERVAL,
+        MYSQL_QUOTA_LOCK_TIMEOUT,
     )
 
     conn = get_db()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-    except sqlite3.OperationalError:
-        _logger.warning("获取上传额度写锁超时，拒绝本次上传")
+    if not acquire_named_lock(conn, "amig_upload_quota", MYSQL_QUOTA_LOCK_TIMEOUT):
+        _logger.warning("获取上传额度串行化锁超时，拒绝本次上传")
         return (False, "系统繁忙，请稍后再试", None)
 
     try:
@@ -1189,13 +1202,15 @@ def reserve_upload_quota(ip, ua_hash_val):
     except _UploadLimitDenied as exc:
         conn.rollback()
         return (False, str(exc), None)
-    except sqlite3.Error:
+    except DatabaseError:
         _logger.exception("上传额度预约失败")
         try:
             conn.rollback()
-        except sqlite3.Error:
+        except DatabaseError:
             pass
         return (False, "系统繁忙，请稍后再试", None)
+    finally:
+        release_named_lock(conn, "amig_upload_quota")
 
 
 def release_upload_reservation(reservation_id):
@@ -1206,7 +1221,7 @@ def release_upload_reservation(reservation_id):
         conn = get_db()
         conn.execute("DELETE FROM upload_reservations WHERE id=?", (reservation_id,))
         conn.commit()
-    except sqlite3.Error:
+    except DatabaseError:
         _logger.warning("释放上传额度预约失败 id=%s", reservation_id, exc_info=True)
 
 
@@ -1260,7 +1275,7 @@ def _admin_image_search_condition(query):
         return None, []
     pattern = _like_pattern(q)
     condition = "(" + " OR ".join(
-        f"{col} LIKE ? ESCAPE '\\'" for col in _ADMIN_IMAGE_SEARCH_COLUMNS
+        f"{col} LIKE ? ESCAPE '!'" for col in _ADMIN_IMAGE_SEARCH_COLUMNS
     ) + ")"
     return condition, [pattern] * len(_ADMIN_IMAGE_SEARCH_COLUMNS)
 
@@ -1280,7 +1295,9 @@ def batch_update_status(ids, status, admin_id, admin_name):
 def get_recent_upload_ips(limit=50):
     """获取最近上传 IP 的统计，点赞数通过子查询一并返回，避免 N+1 查询"""
     return get_db().execute(
-        """SELECT ip, province, city,
+        """SELECT ip,
+           ANY_VALUE(province) as province,
+           ANY_VALUE(city) as city,
            COUNT(*) as upload_count,
            SUM(CASE WHEN status='approved' THEN 1 ELSE 0 END) as approved,
            SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending,
