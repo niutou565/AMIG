@@ -2,7 +2,7 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)规范。
 
-## [未发布] - 2026-11-24
+## [1.2.0] - 2026-11-25
 
 > 数据库后端由 SQLite 迁移至 MySQL 8.0+。业务功能、接口与安全机制保持不变；旧 SQLite 数据可通过一次性迁移工具完整迁入。
 
@@ -36,6 +36,12 @@
 - 环境变量改为 `DB_TYPE`、`MYSQL_HOST/PORT/DATABASE/USER/PASSWORD`、连接池与锁参数；`.env.example` 同步更新；密码不写日志、不进命令行
 - `start.bat` / `start.sh` / `start_bt.sh` 数据库初始化改为每次幂等执行 `init_db.py`（MySQL 连接失败给出明确提示）
 - 测试改为使用独立随机 MySQL 库（`tests/mysql_test_utils.py`），覆盖连接池、事务、并发、迁移、备份恢复等；`test_migration.py` 重写为 SQLite→MySQL 迁移工具测试
+
+### 版本维护与发布规范
+
+- 1.2.0 起为当前主维护版本（`main`，MySQL）；1.1.x 转为老数据库兼容线，仅修复不新增功能，不再为老库创建独立版本分支
+- 新增 `docs/VERSIONING.md`（版本定位与差异）、`docs/MAINTENANCE.md`（维护范围与问题流程）、`docs/BRANCHING.md`（分支、提交与发布规范）
+- 新增 `tools/build_release.py`：按白名单从指定提交打包发布包，并扫描测试/临时/本地配置等禁止条目
 
 ## [1.1.1] - 2026-11-24
 
