@@ -2,10 +2,14 @@
 import re
 from fastapi import APIRouter, Request, Form, File, UploadFile, HTTPException
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from markupsafe import escape, Markup
-from app.config import BASE_DIR, ADMIN_PER_PAGE, LIKES_PER_PAGE, MAX_DESC_LENGTH, MAX_TITLE_LENGTH, UPLOADS_DIR, APP_NAME, APP_VERSION, MAX_UPLOAD_SIZE, SESSION_TTL_HOURS
+from app.config import (
+    BASE_DIR, ADMIN_PER_PAGE, LIKES_PER_PAGE, MAX_DESC_LENGTH, MAX_TITLE_LENGTH,
+    UPLOADS_DIR, APP_NAME, APP_VERSION, MAX_UPLOAD_SIZE, SESSION_TTL_HOURS,
+    DB_TYPE, DATABASE_PATH, MYSQL_HOST, MYSQL_PORT, MYSQL_DATABASE, MYSQL_USER,
+)
 from app.models import (
     get_images_by_status, count_images_by_status, get_image_by_id,
     update_image_status, update_image_content, delete_image, get_all_links, get_link_by_id,
@@ -37,6 +41,8 @@ from app.display import safe_color
 import os
 import json
 import logging
+import threading
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -862,6 +868,7 @@ async def admin_settings(request: Request):
     # 展示时统一为归一化后的域名，便于管理员核对
     settings["admin_domain"] = ", ".join(normalize_admin_domains(settings.get("admin_domain", ""))[0])
     ctx["settings"] = settings
+    ctx["db_type_text"] = _current_db_description()["text"]
     return templates.TemplateResponse(request, "admin/settings.html", ctx)
 
 
@@ -1255,3 +1262,208 @@ async def admin_change_password_action(
     response = templates.TemplateResponse(request, "admin/change_password.html", ctx)
     _set_admin_session_cookie(response, new_session, request)
     return response
+
+
+# ========== 数据库切换（三次确认，保留数据） ==========
+
+_db_switch_state = {
+    "status": "idle", "percent": 0, "step": "", "logs": [], "error": "", "report": None,
+}
+_db_switch_guard = threading.RLock()
+
+
+def _switch_snapshot():
+    with _db_switch_guard:
+        return {
+            "status": _db_switch_state["status"],
+            "percent": _db_switch_state["percent"],
+            "step": _db_switch_state["step"],
+            "logs": list(_db_switch_state["logs"]),
+            "error": _db_switch_state["error"],
+            "report": _db_switch_state["report"],
+        }
+
+
+def _switch_update(percent=None, step=None, status=None, error=None):
+    with _db_switch_guard:
+        if percent is not None:
+            _db_switch_state["percent"] = int(percent)
+        if step is not None:
+            _db_switch_state["step"] = step
+        if status is not None:
+            _db_switch_state["status"] = status
+        if error is not None:
+            _db_switch_state["error"] = error
+
+
+def _switch_log(message: str):
+    stamp = datetime.now().strftime("%H:%M:%S")
+    with _db_switch_guard:
+        _db_switch_state["logs"].append(f"[{stamp}] {message}")
+        if len(_db_switch_state["logs"]) > 300:
+            del _db_switch_state["logs"][:100]
+
+
+def _current_db_description() -> dict:
+    if DB_TYPE == "sqlite":
+        return {"type": "sqlite", "text": f"SQLite：{DATABASE_PATH}", "database_path": DATABASE_PATH}
+    return {
+        "type": "mysql",
+        "text": f"MySQL：{MYSQL_USER}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DATABASE}",
+        "host": MYSQL_HOST, "port": MYSQL_PORT,
+        "database": MYSQL_DATABASE, "user": MYSQL_USER,
+    }
+
+
+def _switch_worker(target: dict, admin: dict):
+    from app import db_migration
+
+    table_index = {"value": 0}
+
+    def progress(stage: str, table, done):
+        if stage == "backup":
+            _switch_update(8, "备份当前数据库")
+            _switch_log("正在备份当前数据库…")
+        elif stage == "copy":
+            table_index["value"] += 1
+            percent = min(75, 15 + table_index["value"] * 4)
+            _switch_update(percent, f"复制数据：{table}")
+            _switch_log(f"{table} 已复制 {done} 行")
+        elif stage == "verify":
+            _switch_update(85, f"校验数据：{table}")
+        elif stage == "env":
+            _switch_update(95, "写入配置文件")
+
+    try:
+        report = db_migration.switch_database(
+            target, env_path=str(BASE_DIR / ".env"), progress=progress
+        )
+        _switch_update(100, "切换完成（需重启生效）", status="success")
+        _switch_log(f"切换完成：{report['total_rows']} 行数据已迁移，备份 {report['backup_path']}")
+        insert_admin_log(
+            admin["id"], admin["username"], "database_switch",
+            f"切换数据库到 {report['target']}；备份 {report['backup_path']}",
+        )
+        with _db_switch_guard:
+            _db_switch_state["report"] = report
+    except Exception as exc:
+        message = str(exc).strip() or exc.__class__.__name__
+        _switch_update(status="failed", step="切换失败", error=message)
+        _switch_log(f"切换失败：{message}")
+        logger.exception("数据库切换失败")
+    finally:
+        db_migration.release_switch_lock()
+
+
+def _switch_page_context(request, admin=None, error="", target=None):
+    from app import db_migration
+    ctx = get_admin_context(request, admin=admin)
+    ctx["current_db"] = _current_db_description()
+    ctx["switch"] = _switch_snapshot()
+    ctx["switch_locked"] = db_migration.switch_in_progress()
+    ctx["target"] = target or {}
+    if error:
+        ctx["error"] = error
+    return ctx
+
+
+@router.get("/settings/database", response_class=HTMLResponse)
+async def admin_database_page(request: Request):
+    admin = admin_required(request)
+    if not admin:
+        return RedirectResponse(url="/admin/login", status_code=302)
+    return templates.TemplateResponse(
+        request, "admin/database.html", _switch_page_context(request, admin=admin)
+    )
+
+
+@router.get("/settings/database/progress")
+async def admin_database_progress(request: Request):
+    admin = admin_required(request)
+    if not admin:
+        return RedirectResponse(url="/admin/login", status_code=302)
+    from app import db_migration
+    snapshot = _switch_snapshot()
+    snapshot["locked"] = db_migration.switch_in_progress()
+    return JSONResponse(snapshot)
+
+
+@router.post("/settings/database/switch", response_class=HTMLResponse)
+async def admin_database_switch(request: Request):
+    admin = admin_required(request)
+    if not admin:
+        return RedirectResponse(url="/admin/login", status_code=302)
+    form = await request.form()
+    csrf_token = form.get("csrf_token", "")
+    if not validate_admin_csrf(request, csrf_token):
+        return RedirectResponse(url="/admin/settings/database", status_code=302)
+
+    from app import db_migration
+
+    target_raw = {
+        "db_type": form.get("target_type", "sqlite"),
+        "database_path": form.get("sqlite_path", ""),
+        "host": form.get("mysql_host", ""),
+        "port": form.get("mysql_port", ""),
+        "database": form.get("mysql_database", ""),
+        "user": form.get("mysql_user", ""),
+        "password": form.get("mysql_password", ""),
+    }
+    shown_target = {k: v for k, v in target_raw.items() if k != "password"}
+
+    # 三次确认：两个勾选 + 输入确认词
+    if form.get("confirm_read") != "on":
+        return templates.TemplateResponse(
+            request, "admin/database.html",
+            _switch_page_context(request, admin=admin,
+                                 error="请先勾选「我已知晓切换期间需要停机维护」",
+                                 target=shown_target),
+        )
+    if form.get("confirm_backup") != "on":
+        return templates.TemplateResponse(
+            request, "admin/database.html",
+            _switch_page_context(request, admin=admin,
+                                 error="请勾选「我确认理解系统会自动备份当前数据库」",
+                                 target=shown_target),
+        )
+    if str(form.get("confirm_word", "")).strip() != "切换":
+        return templates.TemplateResponse(
+            request, "admin/database.html",
+            _switch_page_context(request, admin=admin,
+                                 error="请输入确认词「切换」以完成第三次确认",
+                                 target=shown_target),
+        )
+
+    try:
+        target = db_migration.normalize_target(target_raw)
+        current = db_migration.current_source()
+        if (target["db_type"] == current["db_type"] and
+                (target.get("database_path") == current.get("database_path")) and
+                (target.get("host") == current.get("host")) and
+                (target.get("database") == current.get("database"))):
+            raise db_migration.MigrationError("目标数据库与当前数据库相同，无需切换")
+    except db_migration.MigrationError as exc:
+        return templates.TemplateResponse(
+            request, "admin/database.html",
+            _switch_page_context(request, admin=admin, error=str(exc), target=shown_target),
+        )
+
+    if not db_migration.acquire_switch_lock():
+        return templates.TemplateResponse(
+            request, "admin/database.html",
+            _switch_page_context(request, admin=admin,
+                                 error="已有数据库切换任务正在执行，请等待其完成"),
+        )
+
+    with _db_switch_guard:
+        _db_switch_state.update({
+            "status": "running", "percent": 2, "step": "准备切换",
+            "logs": [], "error": "", "report": None,
+        })
+    _switch_log(f"目标数据库：{db_migration.describe(target)}")
+    threading.Thread(
+        target=_switch_worker,
+        args=(target, {"id": admin["id"], "username": admin["username"]}),
+        daemon=True,
+    ).start()
+    return RedirectResponse(url="/admin/settings/database", status_code=302)

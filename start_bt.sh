@@ -46,7 +46,8 @@ echo "[*] Upgrading pip..."
 python3 -m pip install --upgrade pip >/dev/null 2>&1 || true
 
 echo "[*] Checking dependencies..."
-if ! python3 -c "import fastapi, uvicorn, multipart, PIL, bcrypt, aiofiles, jinja2, httpx, pymysql" >/dev/null 2>&1; then
+# 注意：PyMySQL 仅在 DB_TYPE=mysql 时需要，SQLite 用户无需安装
+if ! python3 -c "import fastapi, uvicorn, multipart, PIL, bcrypt, aiofiles, jinja2, httpx" >/dev/null 2>&1; then
     echo "[*] Installing dependencies (system python3)..."
     # Debian/Ubuntu PEP 668 限制时需 --break-system-packages
     python3 -m pip install --break-system-packages -r "$SCRIPT_DIR/requirements.txt" 2>/dev/null \
@@ -74,14 +75,16 @@ else
     echo "[OK] .env config file exists"
 fi
 
-# ========== Step 5: 初始化数据库（MySQL，幂等） ==========
+# ========== Step 5: 初始化数据库（SQLite / MySQL，幂等） ==========
 echo ""
 echo "[*] Initializing database..."
 mkdir -p "$SCRIPT_DIR/data"
+# 老版本升级同样走这里：自动补齐表结构与索引，原数据保持不变
 python3 "$SCRIPT_DIR/init_db.py" || {
     echo "[ERROR] Database initialization failed."
-    echo "        Please check MYSQL_HOST / MYSQL_PORT / MYSQL_DATABASE / MYSQL_USER / MYSQL_PASSWORD"
-    echo "        in .env, and make sure MySQL 8.0+ is running."
+    echo "        DB_TYPE=sqlite: check DATABASE_PATH and directory permissions in .env"
+    echo "        DB_TYPE=mysql : check MYSQL_HOST / MYSQL_PORT / MYSQL_DATABASE / MYSQL_USER / MYSQL_PASSWORD,"
+    echo "        make sure MySQL 8.0+ is running and PyMySQL is installed."
     exit 1
 }
 

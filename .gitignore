@@ -8,6 +8,9 @@ __pycache__/
 
 # ===== 本地环境配置（勿提交真实密钥）=====
 .env
+.env.bak
+.env.installer_backup_*
+!.env.example
 
 # ===== SQLite 数据库（data/ 下其余本地文件也不提交）=====
 data/*
@@ -36,6 +39,7 @@ logs/
 # ===== 编辑器 / IDE =====
 .vscode/
 .idea/
+.trae/
 *.swp
 *.swo
 .DS_Store

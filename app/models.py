@@ -8,6 +8,7 @@ from datetime import datetime, timezone, timedelta
 from app.database import (
     get_db, transaction, IntegrityError, DatabaseError,
     acquire_named_lock, release_named_lock,
+    upsert_suffix, random_unit_expr, least_expr,
 )
 from app.config import VIEW_DEDUP_WINDOW
 
@@ -158,8 +159,9 @@ def get_latest_approved_images(limit=12):
 def get_random_image_prefer_low_heat(exclude_id=None):
     """随机返回一张已通过图片，权重向热度（点赞数）较低的图片倾斜。
 
-    加权抽样在 MySQL 端完成（仅返回一行），避免把全部图片记录加载到
+    加权抽样在数据库端完成（仅返回一行），避免把全部图片记录加载到
     Python 内存中。权重 = 1/(like_count+1)，用均匀随机数的倒数做竞速排序。
+    随机数表达式由 database.random_unit_expr() 按当前后端生成。
     """
     db = get_db()
     condition = "status='approved'"
@@ -169,8 +171,7 @@ def get_random_image_prefer_low_heat(exclude_id=None):
         params.append(exclude_id)
     row = db.execute(
         f"""SELECT id FROM images WHERE {condition}
-            ORDER BY (COALESCE(like_count, 0) + 1) /
-                     ((FLOOR(RAND() * 1000000007) + 1) / 1000000008.0)
+            ORDER BY (COALESCE(like_count, 0) + 1) / {random_unit_expr()}
             ASC LIMIT 1""",
         params
     ).fetchone()
@@ -500,7 +501,10 @@ def add_like_atomic(image_id, ip, ua_hash_val, province, city, date_str=None):
         )
         conn.execute(
             "INSERT INTO daily_stats (date, like_count) VALUES (?, 1) "
-            "ON DUPLICATE KEY UPDATE like_count = like_count + 1",
+            + upsert_suffix(
+                "ON DUPLICATE KEY UPDATE like_count = like_count + 1",
+                "ON CONFLICT(`date`) DO UPDATE SET like_count = daily_stats.like_count + 1",
+            ),
             (date_str,),
         )
         return True
@@ -701,7 +705,10 @@ def set_setting(key, value):
     db = get_db()
     db.execute(
         "INSERT INTO settings (`key`, value) VALUES (?,?) "
-        "ON DUPLICATE KEY UPDATE value = VALUES(value)",
+        + upsert_suffix(
+            "ON DUPLICATE KEY UPDATE value = VALUES(value)",
+            "ON CONFLICT(`key`) DO UPDATE SET value = excluded.value",
+        ),
         (key, str(value))
     )
     db.commit()
@@ -814,7 +821,10 @@ def ensure_daily_stats(date_str=None):
     db = get_db()
     db.execute(
         "INSERT INTO daily_stats (date) VALUES (?) "
-        "ON DUPLICATE KEY UPDATE date = date",
+        + upsert_suffix(
+            "ON DUPLICATE KEY UPDATE date = date",
+            "ON CONFLICT(`date`) DO NOTHING",
+        ),
         (date_str,),
     )
     db.commit()
@@ -832,7 +842,10 @@ def increment_daily_stat(date_str, field):
     # 字段名来自白名单校验，值用参数传递，不存在 SQL 注入面
     db.execute(
         f"INSERT INTO daily_stats (date, {field}) VALUES (?, 1) "
-        f"ON DUPLICATE KEY UPDATE {field} = {field} + 1",
+        + upsert_suffix(
+            f"ON DUPLICATE KEY UPDATE {field} = {field} + 1",
+            f"ON CONFLICT(`date`) DO UPDATE SET {field} = daily_stats.{field} + 1",
+        ),
         (date_str,),
     )
     db.commit()
@@ -980,8 +993,13 @@ def should_count_view(image_id, ip):
         return False
     cursor = db.execute(
         "INSERT INTO view_sessions (image_id, ip, viewed_at) VALUES (?,?,?) "
-        "ON DUPLICATE KEY UPDATE viewed_at = "
-        "IF(viewed_at <= ?, VALUES(viewed_at), viewed_at)",
+        + upsert_suffix(
+            "ON DUPLICATE KEY UPDATE viewed_at = "
+            "IF(viewed_at <= ?, VALUES(viewed_at), viewed_at)",
+            # SQLite 用条件 UPDATE：不满足条件时不改行，rowcount 与 MySQL 语义一致
+            "ON CONFLICT(image_id, ip) DO UPDATE SET viewed_at = excluded.viewed_at "
+            "WHERE view_sessions.viewed_at <= ?",
+        ),
         (image_id, ip, now_iso(), cutoff),
     )
     db.commit()
@@ -1007,10 +1025,16 @@ def increment_reject_cooldown(ip):
     db.execute(
         "INSERT INTO cooling (ip, reject_count, cooldown_multiplier, updated_at) "
         "VALUES (?, 1, 1, ?) "
-        "ON DUPLICATE KEY UPDATE "
-        "reject_count = reject_count + 1, "
-        "cooldown_multiplier = LEAST(cooldown_multiplier * 2, 16), "
-        "updated_at = VALUES(updated_at)",
+        + upsert_suffix(
+            "ON DUPLICATE KEY UPDATE "
+            "reject_count = reject_count + 1, "
+            "cooldown_multiplier = LEAST(cooldown_multiplier * 2, 16), "
+            "updated_at = VALUES(updated_at)",
+            "ON CONFLICT(ip) DO UPDATE SET "
+            "reject_count = cooling.reject_count + 1, "
+            f"cooldown_multiplier = {least_expr('cooling.cooldown_multiplier * 2', '16')}, "
+            "updated_at = excluded.updated_at",
+        ),
         (ip, now),
     )
     db.commit()
@@ -1104,9 +1128,9 @@ class _UploadLimitDenied(Exception):
 def reserve_upload_quota(ip, ua_hash_val):
     """原子地检查并占用上传额度（检查与占用在同一互斥区内完成）。
 
-    使用 MySQL 命名锁 GET_LOCK 串行化并发预约：同一时刻只有一个连接能执行
-    检查+插入，后续请求在锁上排队，锁释放后一定能读到先前请求占用的额度，
-    因此高并发下也不会超额通过限流检查。
+    使用命名锁串行化并发预约（MySQL 为 GET_LOCK，SQLite 为进程内互斥锁）：
+    同一时刻只有一个连接能执行检查+插入，后续请求在锁上排队，锁释放后一定
+    能读到先前请求占用的额度，因此高并发下也不会超额通过限流检查。
 
     预约成功后调用方必须在上传流程结束时（无论成败）调用
     release_upload_reservation：成功时图片已入库计入额度，失败时归还额度。
@@ -1118,6 +1142,11 @@ def reserve_upload_quota(ip, ua_hash_val):
         DEFAULT_UPLOAD_DAILY_TOTAL, DEFAULT_UPLOAD_INTERVAL,
         MYSQL_QUOTA_LOCK_TIMEOUT,
     )
+
+    # 后台正在切换数据库时拒绝新的上传，避免数据只写入即将被替换的旧库
+    from app.db_migration import switch_in_progress
+    if switch_in_progress():
+        return (False, "系统正在切换数据库，请稍后再试", None)
 
     conn = get_db()
     if not acquire_named_lock(conn, "amig_upload_quota", MYSQL_QUOTA_LOCK_TIMEOUT):

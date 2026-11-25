@@ -134,6 +134,16 @@
 
     <button type="submit" class="btn btn-primary">保存设置</button>
 </form>
+
+<h3>数据库</h3>
+<div class="settings-form">
+    <p>当前数据库：<strong>{{ db_type_text }}</strong></p>
+    <p class="form-hint">
+        如需在 SQLite 与 MySQL 之间切换，请进入独立页面操作：切换前会自动备份当前数据库，
+        逐表复制并校验数据，完成后需要重启应用生效（需三次确认）。
+    </p>
+    <p><a class="btn" href="/admin/settings/database">切换数据库</a></p>
+</div>
 {% endblock %}
 
 {% block scripts %}

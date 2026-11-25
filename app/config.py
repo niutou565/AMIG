@@ -7,7 +7,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # 应用版本信息
 APP_NAME = "AMIG"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.5"
 
 # 从 .env 文件加载环境变量（必须在读取 os.getenv 之前执行，否则 ADMIN_DOMAIN 等不生效）
 _env_path = BASE_DIR / ".env"
@@ -24,18 +24,30 @@ if _env_path.exists():
 
 # 从环境变量加载
 ADMIN_DOMAIN = os.getenv("ADMIN_DOMAIN", "")
-# 旧 SQLite 数据库文件路径（仅作为 SQLite → MySQL 迁移工具的默认数据源，
-# 运行时业务数据一律存放在 MySQL 中）
-DATABASE_PATH = os.getenv("DATABASE_PATH", str(BASE_DIR / "data" / "app.db"))
 
-# ── MySQL 数据库配置 ──────────────────────────────────────────────
-DB_TYPE = os.getenv("DB_TYPE", "mysql").strip().lower()
-if DB_TYPE not in ("mysql",):
+# ── 数据库后端选择 ────────────────────────────────────────────────
+# sqlite：单文件数据库，零依赖，适合小站与宝塔等简单部署；
+# mysql ：MySQL 8.0+，适合多 worker / 高并发部署。
+# 兼容性：DB_TYPE 缺失时按 sqlite 处理——1.1.x 老版本用户的 .env 没有该键，
+# 升级到 1.2.5 后直接启动仍然使用原来的 SQLite 库，数据与配置原样保留。
+DB_TYPE = os.getenv("DB_TYPE", "sqlite").strip().lower() or "sqlite"
+if DB_TYPE not in ("sqlite", "mysql"):
     raise SystemExit(
-        f"[配置错误] DB_TYPE 仅支持 mysql（当前值：{DB_TYPE or '(空)'}）。"
-        "AMIG 已使用 MySQL 作为唯一业务数据库后端；如需迁移旧 SQLite 数据，"
-        "请使用 tools/migrate_sqlite_to_mysql.py。"
+        f"[配置错误] DB_TYPE 仅支持 sqlite 或 mysql（当前值：{DB_TYPE or '(空)'}）。"
+        "如需切换数据库，请登录后台管理使用「切换数据库」功能。"
     )
+IS_SQLITE = DB_TYPE == "sqlite"
+
+# SQLite 数据库文件路径（DB_TYPE=sqlite 时使用；相对路径按项目根目录解析）
+_database_path_env = os.getenv("DATABASE_PATH", "data/app.db").strip() or "data/app.db"
+_database_path_obj = Path(_database_path_env)
+if not _database_path_obj.is_absolute():
+    _database_path_obj = BASE_DIR / _database_path_obj
+DATABASE_PATH = str(_database_path_obj)
+# SQLite 锁等待上限（毫秒）：写锁冲突时最多等待该时长再报错
+DB_BUSY_TIMEOUT_MS = int(os.getenv("DB_BUSY_TIMEOUT_MS", "5000"))
+# SQLite 持久性级别（1=NORMAL 2=FULL）；WAL 下 NORMAL 已能保证崩溃安全
+DB_SYNCHRONOUS = int(os.getenv("DB_SYNCHRONOUS", "1"))
 
 MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1").strip()
 MYSQL_PORT = int(os.getenv("MYSQL_PORT", "3306"))

@@ -1,38 +1,39 @@
-"""MySQL 数据库访问层：连接池、线程本地连接、事务管理与库表初始化。
+"""数据库访问层：同时支持 SQLite 与 MySQL 两种后端。
 
-设计要点：
-- 业务模块统一通过 get_db() 获取连接包装器，不直接依赖具体驱动（PyMySQL）。
-- SQL 仍使用 ``?`` 占位符（与历史代码一致），执行前统一翻译为 MySQL 的 ``%s``。
-  注意：SQL 语句本身不允许包含字面量 ``?``；带参数的语句也不能含字面量 ``%``
-  （LIKE 模式一律通过参数传入），无参数语句则可以包含字面量 ``%``。
+后端由 ``DB_TYPE`` 决定（sqlite / mysql），对业务代码暴露同一套接口：
+- 业务模块统一通过 get_db() 获取连接包装器，不直接依赖具体驱动。
+- SQL 统一使用 ``?`` 占位符：SQLite 原生支持；MySQL 在执行前翻译为 ``%s``。
+  注意（MySQL 模式）：SQL 语句本身不允许包含字面量 ``?``；带参数的语句也不能含
+  字面量 ``%``（LIKE 模式一律通过参数传入），无参数语句可以包含字面量 ``%``。
 - 行对象 Row 同时支持 ``row["col"]`` / ``row[0]`` / ``keys()`` / ``get()``，
-  与原 sqlite3.Row 用法兼容，业务代码无需逐行修改。
-- 连接采用「线程本地缓存 + 连接池」：同一请求内的多次 get_db() 复用同一连接；
-  空闲超过 MYSQL_PING_IDLE_SECONDS 的连接在下次使用前自动 ping，失效自动重连。
-- autocommit=True：单条语句即时提交（与原 SQLite 每函数 commit 的行为一致）；
+  与 sqlite3.Row 用法兼容，业务代码无需逐行修改。
+- MySQL：线程本地缓存 + 连接池，空闲连接自动 ping 重连；autocommit=True，
   多语句原子性通过 transaction() 显式开启事务 / SAVEPOINT 保证。
-- 上传额度检查等「读-改-写」操作用 GET_LOCK 串行化（见 models.reserve_upload_quota）。
+- SQLite：线程本地连接（check_same_thread=False，不跨线程共享），WAL 模式，
+  transaction() 外层使用 ``BEGIN IMMEDIATE`` 提前拿写锁，避免升级锁失败。
+- 方言差异（UPSERT / 随机数 / 命名锁等）集中在本模块的助手函数中，
+  models / auth 等业务模块只调用助手，不写死某一后端的语法。
+- 上传额度检查等「读-改-写」操作需要串行化：MySQL 用 GET_LOCK，
+  SQLite 用进程内 threading.Lock（因此 SQLite 模式请保持 WORKERS=1）。
 """
 import contextlib
 import contextvars
 import logging
+import os
 import queue
 import re
+import sqlite3
 import threading
 import time
 from datetime import datetime, timezone
 
-import pymysql
-from pymysql.cursors import DictCursor
-from pymysql.err import (
-    DatabaseError,
-    IntegrityError,
-    MySQLError,
-    OperationalError,
-)
-
 from app.config import (
     BACKUP_DIR,
+    DATABASE_PATH,
+    DB_BUSY_TIMEOUT_MS,
+    DB_SYNCHRONOUS,
+    DB_TYPE,
+    IS_SQLITE,
     MYSQL_CHARSET,
     MYSQL_COLLATION,
     MYSQL_DATABASE,
@@ -45,6 +46,28 @@ from app.config import (
     MYSQL_PORT,
     MYSQL_USER,
 )
+
+if IS_SQLITE:
+    # SQLite 模式不导入 PyMySQL：1.1.x 老版本用户升级后即使没装 PyMySQL 也能直接启动
+    DatabaseError = sqlite3.DatabaseError
+    IntegrityError = sqlite3.IntegrityError
+    OperationalError = sqlite3.OperationalError
+    MySQLError = sqlite3.DatabaseError
+else:
+    try:
+        import pymysql
+        from pymysql.cursors import DictCursor
+        from pymysql.err import (
+            DatabaseError,
+            IntegrityError,
+            MySQLError,
+            OperationalError,
+        )
+    except ImportError as _exc:  # pragma: no cover - 环境缺少依赖时的明确提示
+        raise SystemExit(
+            "[配置错误] DB_TYPE=mysql 需要安装 PyMySQL（pip install PyMySQL）；"
+            "或改用 DB_TYPE=sqlite。原始错误：%s" % _exc
+        )
 
 _logger = logging.getLogger(__name__)
 
@@ -246,6 +269,147 @@ class ConnectionWrapper:
         return self._conn
 
 
+# ── SQLite 连接包装器（与 ConnectionWrapper 同接口） ─────────────────
+
+
+class SqliteCursorWrapper:
+    """SQLite 游标包装器：把 sqlite3.Row 转换为统一的 Row 对象。"""
+
+    __slots__ = ("_cur",)
+
+    def __init__(self, cursor):
+        self._cur = cursor
+
+    @property
+    def lastrowid(self):
+        return self._cur.lastrowid
+
+    @property
+    def rowcount(self):
+        return self._cur.rowcount
+
+    @staticmethod
+    def _wrap(row):
+        if row is None:
+            return None
+        return Row({key: row[key] for key in row.keys()})
+
+    def fetchone(self):
+        return self._wrap(self._cur.fetchone())
+
+    def fetchall(self):
+        return [self._wrap(r) for r in self._cur.fetchall()]
+
+    def close(self):
+        try:
+            self._cur.close()
+        except Exception:
+            pass
+
+
+def _sqlite_is_locked(exc) -> bool:
+    """SQLite 写锁冲突（database is locked / busy）时可安全重试。"""
+    message = str(exc).lower()
+    return "locked" in message or "busy" in message
+
+
+class SqliteConnection:
+    """SQLite 连接包装器：线程本地使用，接口与 ConnectionWrapper 一致。
+
+    连接以 autocommit 模式打开（isolation_level=None），单条语句立即提交；
+    transaction() 外层用 ``BEGIN IMMEDIATE`` 提前获取写锁，避免 WAL 模式下
+    「读事务升级写事务」失败。连接不跨线程共享，因此不需要连接池。
+    """
+
+    __slots__ = ("_conn", "_last_used", "_closed", "_pooled", "_tx_active")
+
+    def __init__(self, path: str):
+        parent = os.path.dirname(os.path.abspath(path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        self._conn = sqlite3.connect(
+            path,
+            timeout=DB_BUSY_TIMEOUT_MS / 1000.0,
+            check_same_thread=False,
+            isolation_level=None,
+        )
+        self._conn.row_factory = sqlite3.Row
+        self._apply_pragmas()
+        self._last_used = time.monotonic()
+        self._closed = False
+        self._pooled = False
+        self._tx_active = False
+
+    def _apply_pragmas(self):
+        try:
+            current = self._conn.execute("PRAGMA journal_mode").fetchone()[0]
+            if str(current).lower() != "wal":
+                self._conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.Error:
+            # 内存库等场景不支持 WAL，忽略即可
+            pass
+        self._conn.execute("PRAGMA foreign_keys=ON")
+        self._conn.execute(f"PRAGMA busy_timeout={int(DB_BUSY_TIMEOUT_MS)}")
+        self._conn.execute(f"PRAGMA synchronous={int(DB_SYNCHRONOUS)}")
+        self._conn.execute("PRAGMA temp_store=MEMORY")
+
+    def execute(self, sql, params=()):
+        if self._closed:
+            raise DatabaseError("数据库连接已关闭，不能执行查询")
+        start = time.monotonic()
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                cursor = self._conn.execute(sql, tuple(params or ()))
+                break
+            except sqlite3.OperationalError as exc:
+                # 显式事务内不重试（可能已有部分语句成功），由事务级重试兜底
+                if (not self._tx_active and _sqlite_is_locked(exc)
+                        and attempt <= _DEADLOCK_RETRY_LIMIT):
+                    _logger.warning(
+                        "SQLite 数据库被锁定，第 %d 次重试: %s", attempt, sql[:120]
+                    )
+                    time.sleep(0.02 * attempt)
+                    continue
+                raise
+        self._last_used = time.monotonic()
+        _log_slow_query(sql, (time.monotonic() - start) * 1000)
+        return SqliteCursorWrapper(cursor)
+
+    def begin(self):
+        if self._conn.in_transaction:
+            # 已有未结束的事务：复用，不重复 BEGIN
+            self._tx_active = True
+            return
+        self._conn.execute("BEGIN IMMEDIATE")
+        self._tx_active = True
+        self._last_used = time.monotonic()
+
+    def commit(self):
+        self._conn.commit()
+        self._tx_active = False
+        self._last_used = time.monotonic()
+
+    def rollback(self):
+        try:
+            self._conn.rollback()
+        except sqlite3.Error:
+            pass
+        self._tx_active = False
+        self._last_used = time.monotonic()
+
+    def close(self):
+        self._closed = True
+        try:
+            self._conn.close()
+        except sqlite3.Error:
+            pass
+
+    def raw(self):
+        return self._conn
+
+
 def _log_slow_query(sql: str, elapsed_ms: float):
     from app.config import DB_SLOW_QUERY_MS
 
@@ -391,10 +555,25 @@ def end_request_scope(holder, token):
 
 
 def _checkout():
-    conn = _POOL.checkout()
+    if IS_SQLITE:
+        conn = SqliteConnection(DATABASE_PATH)
+    else:
+        conn = _POOL.checkout()
     with _all_lock:
         _all_wrappers.add(conn)
     return conn
+
+
+def _discard_connection(conn):
+    """丢弃一个连接（SQLite 直接关闭；MySQL 关闭并归还池计数）。"""
+    if conn is None:
+        return
+    with _all_lock:
+        _all_wrappers.discard(conn)
+    if IS_SQLITE:
+        conn.close()
+    else:
+        _POOL._discard(conn)
 
 
 def _release_connection(conn):
@@ -402,7 +581,11 @@ def _release_connection(conn):
         return
     with _all_lock:
         _all_wrappers.discard(conn)
-    _POOL.checkin(conn)
+    if IS_SQLITE:
+        # SQLite 连接不进入池：直接关闭，下次使用时重新打开
+        conn.close()
+    else:
+        _POOL.checkin(conn)
 
 
 # ── 对外接口 ─────────────────────────────────────────────────────────
@@ -417,9 +600,7 @@ def get_db() -> ConnectionWrapper:
             return conn
         if conn is not None:
             # 连接已失效：丢弃后重新签出
-            _POOL._discard(conn)
-            with _all_lock:
-                _all_wrappers.discard(conn)
+            _discard_connection(conn)
         holder.conn = _checkout()
         return holder.conn
 
@@ -427,9 +608,7 @@ def get_db() -> ConnectionWrapper:
     if conn is not None and not conn._closed:
         return conn
     if conn is not None:
-        _POOL._discard(conn)
-        with _all_lock:
-            _all_wrappers.discard(conn)
+        _discard_connection(conn)
     conn = _checkout()
     _local.conn = conn
     return conn
@@ -458,8 +637,12 @@ def close_all_db():
         wrappers = list(_all_wrappers)
         _all_wrappers.clear()
     for conn in wrappers:
-        _POOL._discard(conn)
-    _POOL.reset()
+        if IS_SQLITE:
+            conn.close()
+        else:
+            _POOL._discard(conn)
+    if not IS_SQLITE:
+        _POOL.reset()
 
 
 def _reset_pool():
@@ -520,6 +703,14 @@ def run_in_transaction_with_retry(func, retries=_DEADLOCK_RETRY_LIMIT):
             with transaction() as conn:
                 return func(conn)
         except OperationalError as exc:
+            if IS_SQLITE:
+                if _sqlite_is_locked(exc) and attempt < retries:
+                    _logger.warning(
+                        "事务执行遇到数据库锁定，第 %d 次整体重试", attempt
+                    )
+                    time.sleep(0.05 * attempt)
+                    continue
+                raise
             code = exc.args[0] if exc.args else None
             if code in (1213, 1205) and attempt < retries:
                 _logger.warning(
@@ -531,17 +722,77 @@ def run_in_transaction_with_retry(func, retries=_DEADLOCK_RETRY_LIMIT):
             raise
 
 
-def acquire_named_lock(conn: ConnectionWrapper, name: str, timeout: int) -> bool:
-    """获取 MySQL 命名互斥锁（用于「读-改-写」原子化），失败返回 False。
+# SQLite 模式的命名锁：进程内互斥（SQLite 模式请保持 WORKERS=1，
+# 多进程部署请改用 MySQL）。记录「线程 → 已持有的锁」，保证成对释放。
+_sqlite_named_locks: dict = {}
+_sqlite_named_locks_guard = threading.Lock()
+_sqlite_held_locks = threading.local()
 
-    锁与连接绑定，必须与 release_named_lock 成对使用，异常路径也要释放。
+
+def acquire_named_lock(conn, name: str, timeout: int) -> bool:
+    """获取命名互斥锁（用于「读-改-写」原子化），失败返回 False。
+
+    MySQL 使用 GET_LOCK（跨连接/多 worker 生效），SQLite 使用进程内
+    threading.Lock（单进程内生效）。必须与 release_named_lock 成对使用，
+    异常路径也要释放。
     """
-    row = conn.execute("SELECT GET_LOCK(%s, %s) AS locked", (name, timeout)).fetchone()
+    if IS_SQLITE:
+        with _sqlite_named_locks_guard:
+            lock = _sqlite_named_locks.setdefault(name, threading.Lock())
+        if not lock.acquire(timeout=timeout):
+            return False
+        held = getattr(_sqlite_held_locks, "names", None)
+        if held is None:
+            held = set()
+            _sqlite_held_locks.names = held
+        held.add(name)
+        return True
+    row = conn.execute(
+        "SELECT GET_LOCK(%s, %s) AS locked", (name, timeout)
+    ).fetchone()
     return row is not None and row["locked"] == 1
 
 
-def release_named_lock(conn: ConnectionWrapper, name: str):
+def release_named_lock(conn, name: str):
+    if IS_SQLITE:
+        held = getattr(_sqlite_held_locks, "names", None)
+        if held and name in held:
+            held.discard(name)
+            with _sqlite_named_locks_guard:
+                lock = _sqlite_named_locks.get(name)
+            if lock is not None:
+                try:
+                    lock.release()
+                except RuntimeError:
+                    pass
+        return
     conn.execute("SELECT RELEASE_LOCK(%s)", (name,))
+
+
+# ── 方言助手：业务模块只调用这些函数，不写死某一后端的语法 ───────────
+
+
+def upsert_suffix(mysql_clause: str, sqlite_clause: str) -> str:
+    """返回 UPSERT 子句（含前导空格）。
+
+    用法：``"INSERT INTO ... VALUES (?,?) " + upsert_suffix(
+        "ON DUPLICATE KEY UPDATE value = VALUES(value)",
+        "ON CONFLICT(`key`) DO UPDATE SET value = excluded.value",
+    )``
+    """
+    return f" {sqlite_clause}" if IS_SQLITE else f" {mysql_clause}"
+
+
+def random_unit_expr() -> str:
+    """返回 (0, 1] 区间的均匀随机浮点表达式（用于加权随机抽样）。"""
+    if IS_SQLITE:
+        return "((abs(random()) % 1000000007 + 1) / 1000000008.0)"
+    return "((FLOOR(RAND() * 1000000007) + 1) / 1000000008.0)"
+
+
+def least_expr(a: str, b: str) -> str:
+    """返回两者取小的 SQL 表达式（MySQL 用 LEAST，SQLite 用标量 MIN）。"""
+    return f"MIN({a}, {b})" if IS_SQLITE else f"LEAST({a}, {b})"
 
 
 # ── 表结构初始化 ─────────────────────────────────────────────────────
@@ -749,13 +1000,262 @@ EXPECTED_TABLES = (
 )
 
 
+# ── SQLite 表结构（与上面的 MySQL DDL 保持同列同索引） ────────────────
+
+_SQLITE_SCHEMA_DDL = [
+    """
+    CREATE TABLE IF NOT EXISTS images (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        filename        TEXT NOT NULL,
+        thumb_filename  TEXT NOT NULL DEFAULT '',
+        original_size   INTEGER NOT NULL DEFAULT 0,
+        compressed_size INTEGER NOT NULL DEFAULT 0,
+        width           INTEGER NOT NULL DEFAULT 0,
+        height          INTEGER NOT NULL DEFAULT 0,
+        description     TEXT NULL DEFAULT '',
+        title           TEXT NOT NULL DEFAULT '',
+        author          TEXT NULL DEFAULT NULL,
+        content_md5     TEXT NOT NULL DEFAULT '',
+        ip              TEXT NOT NULL DEFAULT '',
+        ua              TEXT NULL DEFAULT '',
+        ua_hash         TEXT NOT NULL DEFAULT '',
+        province        TEXT NOT NULL DEFAULT '',
+        city            TEXT NOT NULL DEFAULT '',
+        region          TEXT NOT NULL DEFAULT '',
+        status          TEXT NOT NULL DEFAULT 'pending',
+        reject_reason   TEXT NULL DEFAULT NULL,
+        admin_edited    INTEGER NOT NULL DEFAULT 0,
+        created_at      TEXT NOT NULL,
+        reviewed_at     TEXT NULL DEFAULT NULL,
+        views           INTEGER NOT NULL DEFAULT 0,
+        like_count      INTEGER NOT NULL DEFAULT 0,
+        is_duplicate    INTEGER NOT NULL DEFAULT 0
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS likes (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        image_id    INTEGER NOT NULL,
+        ip          TEXT NOT NULL,
+        ua_hash     TEXT NOT NULL,
+        province    TEXT NOT NULL DEFAULT '',
+        city        TEXT NOT NULL DEFAULT '',
+        created_at  TEXT NOT NULL,
+        FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS ban_list (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        target      TEXT NOT NULL,
+        type        TEXT NOT NULL,
+        reason      TEXT NOT NULL DEFAULT '',
+        admin_id    INTEGER NOT NULL,
+        created_at  TEXT NOT NULL,
+        is_active   INTEGER NOT NULL DEFAULT 1
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS admins (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        username        TEXT NOT NULL UNIQUE,
+        password_hash   TEXT NOT NULL,
+        login_attempts  INTEGER NOT NULL DEFAULT 0,
+        locked_until    TEXT NULL DEFAULT NULL,
+        created_at      TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS sessions (
+        session_id   TEXT PRIMARY KEY,
+        admin_id     INTEGER NOT NULL,
+        username     TEXT NOT NULL,
+        created_at   TEXT NOT NULL,
+        expires_at   TEXT NOT NULL,
+        csrf_token   TEXT NOT NULL DEFAULT '',
+        last_seen_at TEXT NOT NULL DEFAULT ''
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS login_rate_limits (
+        `key`         TEXT PRIMARY KEY,
+        attempts      INTEGER NOT NULL DEFAULT 0,
+        window_start  TEXT NOT NULL,
+        updated_at    TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS settings (
+        `key`    TEXT PRIMARY KEY,
+        value    TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS upload_reservations (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        ip          TEXT NOT NULL,
+        ua_hash     TEXT NOT NULL,
+        created_at  TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS pages (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        slug        TEXT NOT NULL UNIQUE,
+        title       TEXT NOT NULL,
+        content     TEXT NULL DEFAULT '',
+        sort_order  INTEGER NOT NULL DEFAULT 0,
+        is_visible  INTEGER NOT NULL DEFAULT 1,
+        updated_at  TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS friend_links (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        name        TEXT NOT NULL,
+        url         TEXT NOT NULL,
+        sort_order  INTEGER NOT NULL DEFAULT 0,
+        is_visible  INTEGER NOT NULL DEFAULT 1,
+        created_at  TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS daily_stats (
+        `date`          TEXT PRIMARY KEY,
+        upload_count    INTEGER NOT NULL DEFAULT 0,
+        approved_count  INTEGER NOT NULL DEFAULT 0,
+        rejected_count  INTEGER NOT NULL DEFAULT 0,
+        like_count      INTEGER NOT NULL DEFAULT 0,
+        view_count      INTEGER NOT NULL DEFAULT 0
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS admin_logs (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        admin_id    INTEGER NOT NULL,
+        admin_name  TEXT NOT NULL,
+        action      TEXT NOT NULL,
+        detail      TEXT NULL DEFAULT '',
+        target      TEXT NOT NULL DEFAULT '',
+        ip          TEXT NOT NULL DEFAULT '',
+        location    TEXT NOT NULL DEFAULT '',
+        created_at  TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS view_sessions (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        image_id    INTEGER NOT NULL,
+        ip          TEXT NOT NULL,
+        viewed_at   TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS cooling (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        ip                  TEXT NOT NULL UNIQUE,
+        reject_count        INTEGER NOT NULL DEFAULT 0,
+        cooldown_multiplier INTEGER NOT NULL DEFAULT 1,
+        updated_at          TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+        version     INTEGER PRIMARY KEY,
+        applied_at  TEXT NOT NULL
+    )
+    """,
+]
+
+_SQLITE_INDEX_DDL = [
+    "CREATE INDEX IF NOT EXISTS idx_images_status ON images(status)",
+    "CREATE INDEX IF NOT EXISTS idx_images_reviewed_at ON images(reviewed_at)",
+    "CREATE INDEX IF NOT EXISTS idx_images_like_count ON images(like_count)",
+    "CREATE INDEX IF NOT EXISTS idx_images_content_md5 ON images(content_md5)",
+    "CREATE INDEX IF NOT EXISTS idx_images_created_at ON images(created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_images_ip ON images(ip)",
+    "CREATE INDEX IF NOT EXISTS idx_images_ua_hash ON images(ua_hash)",
+    "CREATE INDEX IF NOT EXISTS idx_images_filename ON images(filename)",
+    "CREATE INDEX IF NOT EXISTS idx_images_thumb_filename ON images(thumb_filename)",
+    "CREATE INDEX IF NOT EXISTS idx_images_status_reviewed ON images(status, reviewed_at)",
+    "CREATE INDEX IF NOT EXISTS idx_images_status_created ON images(status, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_images_status_like ON images(status, like_count)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_likes_fingerprint ON likes(image_id, ip, ua_hash)",
+    "CREATE INDEX IF NOT EXISTS idx_likes_created_at ON likes(created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_likes_image_id ON likes(image_id)",
+    "CREATE INDEX IF NOT EXISTS idx_likes_ip ON likes(ip)",
+    "CREATE INDEX IF NOT EXISTS idx_likes_province ON likes(province)",
+    "CREATE INDEX IF NOT EXISTS idx_likes_image_created ON likes(image_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_ban_list_target ON ban_list(target)",
+    "CREATE INDEX IF NOT EXISTS idx_ban_list_type ON ban_list(type)",
+    "CREATE INDEX IF NOT EXISTS idx_admin_logs_created_at ON admin_logs(created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_admin_logs_ip ON admin_logs(ip)",
+    "CREATE INDEX IF NOT EXISTS idx_admin_logs_action ON admin_logs(action)",
+    "CREATE INDEX IF NOT EXISTS idx_admin_logs_action_created ON admin_logs(action, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at)",
+    "CREATE INDEX IF NOT EXISTS idx_login_rate_limits_window ON login_rate_limits(window_start)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_view_sessions_unique ON view_sessions(image_id, ip)",
+    "CREATE INDEX IF NOT EXISTS idx_view_sessions_lookup ON view_sessions(image_id, ip, viewed_at)",
+    "CREATE INDEX IF NOT EXISTS idx_upload_reservations_ip ON upload_reservations(ip, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_upload_reservations_created ON upload_reservations(created_at)",
+]
+
+# 老版本 SQLite 库补列：1.1.x 及更早版本的库可能缺少这些列。
+# 必须在建索引之前执行（否则 CREATE INDEX 会因列不存在失败）。
+_SQLITE_ADD_COLUMN_SPECS = {
+    "images": [
+        ("content_md5", "content_md5 TEXT NOT NULL DEFAULT ''"),
+        ("ip", "ip TEXT NOT NULL DEFAULT ''"),
+        ("ua", "ua TEXT DEFAULT ''"),
+        ("ua_hash", "ua_hash TEXT NOT NULL DEFAULT ''"),
+        ("province", "province TEXT DEFAULT ''"),
+        ("city", "city TEXT DEFAULT ''"),
+        ("title", "title TEXT DEFAULT ''"),
+        ("region", "region TEXT DEFAULT ''"),
+        ("status", "status TEXT DEFAULT 'pending'"),
+        ("reject_reason", "reject_reason TEXT DEFAULT NULL"),
+        ("admin_edited", "admin_edited INTEGER DEFAULT 0"),
+        ("reviewed_at", "reviewed_at TEXT DEFAULT NULL"),
+        ("views", "views INTEGER DEFAULT 0"),
+        ("like_count", "like_count INTEGER DEFAULT 0"),
+        ("is_duplicate", "is_duplicate INTEGER DEFAULT 0"),
+    ],
+    "admin_logs": [
+        ("ip", "ip TEXT DEFAULT ''"),
+        ("location", "location TEXT DEFAULT ''"),
+    ],
+    "sessions": [
+        ("csrf_token", "csrf_token TEXT DEFAULT ''"),
+        ("last_seen_at", "last_seen_at TEXT DEFAULT ''"),
+    ],
+    "likes": [
+        ("province", "province TEXT DEFAULT ''"),
+        ("city", "city TEXT DEFAULT ''"),
+    ],
+}
+
+
+def _sqlite_add_column(conn, table, col_def):
+    """为已存在的表补列；列已存在时忽略（多 worker 并发启动也安全）。"""
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
+    except DatabaseError as exc:
+        if "duplicate column" not in str(exc).lower():
+            raise
+
+
 def _validate_database_name(name: str):
     if not name or not _IDENTIFIER_RE.match(name):
         raise DatabaseError(f"MySQL 数据库名非法：{name!r}（仅允许字母数字与 _ $）")
 
 
 def _ensure_database():
-    """连接到 MySQL 服务器并确保目标库存在（utf8mb4）。"""
+    """确保目标数据库可用：MySQL 建库；SQLite 建目录。"""
+    if IS_SQLITE:
+        parent = os.path.dirname(os.path.abspath(DATABASE_PATH))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        return
     _validate_database_name(MYSQL_DATABASE)
     conn = pymysql.connect(
         host=MYSQL_HOST,
@@ -777,33 +1277,80 @@ def _ensure_database():
 
 
 def _applied_versions(conn) -> set:
-    rows = conn.execute("SELECT version FROM schema_migrations").fetchall()
+    try:
+        rows = conn.execute("SELECT version FROM schema_migrations").fetchall()
+    except DatabaseError:
+        # 更早期的库没有版本表
+        return set()
     return {int(r[0]) for r in rows}
 
 
 def _record_version(conn, version):
+    if IS_SQLITE:
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (version, datetime.now(timezone.utc).isoformat(timespec="seconds")),
+        )
+        return
     conn.execute(
         "INSERT IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
         (version, datetime.now(timezone.utc).isoformat(timespec="seconds")),
     )
 
 
-def _init_db_once():
+def _init_db_once_mysql():
     _ensure_database()
     conn = get_db()
     for ddl in _SCHEMA_DDL:
         conn.execute(ddl)
-    applied = _applied_versions(conn)
     with transaction():
         for version in (4, 5, 6, SCHEMA_VERSION):
             _record_version(conn, version)
 
 
+def _init_db_once_sqlite():
+    """SQLite 建表 + 老库补列 + 建索引 + 版本记录（全部幂等）。
+
+    执行顺序固定为「建表 → 补列 → 建索引 → 记录版本」：
+    老版本库缺列时必须先补列，否则 CREATE INDEX 会失败。
+    """
+    _ensure_database()
+    conn = get_db()
+    for ddl in _SQLITE_SCHEMA_DDL:
+        conn.execute(ddl)
+    for table, specs in _SQLITE_ADD_COLUMN_SPECS.items():
+        existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        for col_name, col_def in specs:
+            if col_name not in existing:
+                _sqlite_add_column(conn, table, col_def)
+    # 旧会话没有活动时间时用创建时间回填，避免升级后立即全部失效
+    try:
+        conn.execute(
+            "UPDATE sessions SET last_seen_at=created_at "
+            "WHERE last_seen_at='' OR last_seen_at IS NULL"
+        )
+    except DatabaseError:
+        pass
+    for ddl in _SQLITE_INDEX_DDL:
+        conn.execute(ddl)
+    with transaction():
+        for version in (4, 5, 6, SCHEMA_VERSION):
+            _record_version(conn, version)
+
+
+def _init_db_once():
+    """按当前后端执行一次幂等初始化（供 init_db 重试调用）。"""
+    if IS_SQLITE:
+        _init_db_once_sqlite()
+    else:
+        _init_db_once_mysql()
+
+
 def init_db(max_wait_seconds=60.0):
     """初始化数据库表结构；启动阶段连接不可用时重试至多 max_wait_seconds 秒。
 
-    多 worker 同时启动时，CREATE TABLE IF NOT EXISTS 幂等且 InnoDB DDL 自带
-    互斥，短暂冲突会以指数退避重试消化；真正的连接错误在超时后抛出。
+    多 worker 同时启动时 DDL 幂等，短暂锁冲突以指数退避重试消化；
+    真正的连接错误在超时后抛出。
     """
     deadline = time.monotonic() + max_wait_seconds
     delay = 0.1
@@ -815,7 +1362,8 @@ def init_db(max_wait_seconds=60.0):
             message = str(exc).lower()
             transient = any(
                 kw in message
-                for kw in ("lock", "timeout", "timed out", "gone away", "refused", "can't connect")
+                for kw in ("lock", "busy", "timeout", "timed out", "gone away",
+                           "refused", "can't connect")
             )
             if not transient or time.monotonic() >= deadline:
                 raise
@@ -826,8 +1374,23 @@ def init_db(max_wait_seconds=60.0):
 
 
 def get_db_status() -> dict:
-    """数据库健康信息（check_db 工具使用）：版本、字符集、连接数等。"""
+    """数据库健康信息（check_db 工具使用）：按后端返回各自的诊断字段。"""
     conn = get_db()
+    if IS_SQLITE:
+        def _pragma(name):
+            row = conn.execute(f"PRAGMA {name}").fetchone()
+            return row[0] if row is not None else None
+
+        return {
+            "db_type": "sqlite",
+            "database_path": DATABASE_PATH,
+            "sqlite_version": sqlite3.sqlite_version,
+            "journal_mode": _pragma("journal_mode"),
+            "synchronous": _pragma("synchronous"),
+            "busy_timeout": _pragma("busy_timeout"),
+            "foreign_keys": _pragma("foreign_keys"),
+            "table_count": len(_existing_sqlite_tables(conn)),
+        }
     version = conn.execute("SELECT VERSION() AS v").fetchone()["v"]
     charset_row = conn.execute(
         "SELECT @@character_set_database AS cs, @@collation_database AS co"
@@ -835,6 +1398,7 @@ def get_db_status() -> dict:
     max_conn = conn.execute("SELECT @@max_connections AS mc").fetchone()["mc"]
     threads = conn.execute("SHOW STATUS LIKE 'Threads_connected'").fetchall()
     return {
+        "db_type": "mysql",
         "server_version": version,
         "charset": charset_row["cs"],
         "collation": charset_row["co"],
@@ -842,3 +1406,10 @@ def get_db_status() -> dict:
         "threads_connected": threads[0]["Value"] if threads else None,
         "pool_idle": _POOL.idle_count(),
     }
+
+
+def _existing_sqlite_tables(conn) -> set:
+    rows = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()
+    return {r["name"] for r in rows}

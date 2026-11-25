@@ -123,7 +123,8 @@ def main():
             db.execute("DELETE FROM login_rate_limits")
     except DatabaseError as e:
         print(f"[失败] 数据库连接或操作出错: {type(e).__name__}")
-        print("       请检查 MYSQL_HOST / MYSQL_PORT / MYSQL_USER / MYSQL_PASSWORD / MYSQL_DATABASE 配置")
+        print("       请检查 .env 的 DB_TYPE；sqlite 检查 DATABASE_PATH，")
+        print("       mysql 检查 MYSQL_HOST / MYSQL_PORT / MYSQL_USER / MYSQL_PASSWORD / MYSQL_DATABASE")
         print("       （详细错误信息已写入应用日志，不会显示数据库密码）")
         sys.exit(1)
     except Exception as e:

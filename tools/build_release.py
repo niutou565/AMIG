@@ -31,9 +31,10 @@ from app.config import APP_NAME, APP_VERSION  # noqa: E402
 
 # 允许进入发布包的顶层条目（目录或文件）
 ALLOWED_TOP_LEVEL = {
-    "app", "tools", "docs",
+    "app", "installer", "tools", "docs",
     "README.md", "CHANGELOG.md", "requirements.txt", ".env.example",
     ".gitignore", ".gitattributes",
+    "install.py",
     "init_db.py", "reset_password.py", "run.py",
     "start.bat", "start.sh", "start_bt.sh",
 }

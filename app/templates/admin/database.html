@@ -1,0 +1,148 @@
+{% extends "admin/admin_base.html" %}
+{% block title %}数据库切换{% endblock %}
+
+{% block content %}
+<h1>数据库切换</h1>
+
+<div class="settings-form">
+    <h3>当前数据库</h3>
+    <p><strong>{{ current_db.text }}</strong></p>
+    <p class="form-hint">
+        SQLite 适合小站与单机部署；MySQL 适合多 worker 与高并发部署。
+        切换会先自动备份当前数据库，再逐表复制并在完成后逐表校验，<strong>不会删除旧库数据</strong>。
+    </p>
+</div>
+
+{% if switch.status in ('running', 'success', 'failed') %}
+<div class="settings-form" id="switchStatus">
+    <h3>切换任务</h3>
+    <p id="switchStep">{{ switch.step }}（{{ switch.percent }}%）</p>
+    <div style="height:10px;background:#eee;border-radius:6px;overflow:hidden;margin:8px 0;">
+        <div id="switchBar" style="height:100%;width:{{ switch.percent }}%;background:#c9a063;transition:width .4s;"></div>
+    </div>
+    <pre id="switchLog" style="background:#23211d;color:#e8e2d6;padding:12px;border-radius:8px;max-height:260px;overflow:auto;font-size:12px;white-space:pre-wrap;">{{ switch.logs | join('\n') }}</pre>
+    {% if switch.error %}
+    <p class="form-hint" style="color:#b4432f">失败原因：{{ switch.error }}</p>
+    {% endif %}
+    {% if switch.status == 'success' and switch.report %}
+    <h3>切换结果</h3>
+    <ul class="form-hint">
+        <li>数据来源：{{ switch.report.source }}</li>
+        <li>目标数据库：{{ switch.report.target }}</li>
+        <li>迁移行数：{{ switch.report.total_rows }} 行（逐表行数 + 首尾抽样校验通过）</li>
+        <li>切换前备份：<code>{{ switch.report.backup_path }}</code></li>
+    </ul>
+    <p class="form-hint" style="color:#a76a12">
+        配置已更新，但当前进程仍连接旧数据库。<strong>请立即重启应用</strong>，重启后将使用新的数据库。
+    </p>
+    {% endif %}
+</div>
+{% endif %}
+
+{% if not switch_locked and switch.status != 'running' %}
+<form method="post" action="/admin/settings/database/switch" class="settings-form" id="switchForm">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+    <h3>目标数据库</h3>
+    <div class="form-group">
+        <label><input type="radio" name="target_type" value="sqlite" {% if target.get('db_type', 'sqlite') == 'sqlite' %}checked{% endif %}> SQLite</label>
+        <label><input type="radio" name="target_type" value="mysql" {% if target.get('db_type') == 'mysql' %}checked{% endif %}> MySQL</label>
+    </div>
+
+    <div class="form-group" id="sqliteBox">
+        <label>SQLite 数据库文件路径</label>
+        <input type="text" name="sqlite_path" value="{{ target.get('database_path', 'data/app.db') }}">
+        <p class="form-hint">路径必须指向一个空库（文件不存在或没有任何业务数据）；相对路径按项目根目录解析。</p>
+    </div>
+
+    <div class="form-group" id="mysqlBox">
+        <label>MySQL 主机 / 端口</label>
+        <div style="display:flex;gap:8px;">
+            <input type="text" name="mysql_host" placeholder="127.0.0.1" value="{{ target.get('host', '') }}" style="flex:2">
+            <input type="text" name="mysql_port" placeholder="3306" value="{{ target.get('port', '3306') }}" style="flex:1">
+        </div>
+        <label>数据库名 / 用户名</label>
+        <div style="display:flex;gap:8px;">
+            <input type="text" name="mysql_database" placeholder="amig" value="{{ target.get('database', '') }}" style="flex:1">
+            <input type="text" name="mysql_user" placeholder="amig" value="{{ target.get('user', '') }}" style="flex:1">
+        </div>
+        <label>密码</label>
+        <input type="password" name="mysql_password" autocomplete="new-password" value="">
+        <p class="form-hint">目标库必须为空；请确认账号具备建库/建表权限。</p>
+    </div>
+
+    <h3>三次确认</h3>
+    <div class="form-group">
+        <label><input type="checkbox" name="confirm_read" id="c1"> 1. 我已知晓：切换期间需要停机维护，完成后必须重启应用</label>
+        <label><input type="checkbox" name="confirm_backup" id="c2"> 2. 我确认：系统会自动备份当前数据库，但请自行再确认备份文件可用</label>
+        <label>3. 请输入确认词「切换」</label>
+        <input type="text" name="confirm_word" id="c3" placeholder="切换" autocomplete="off">
+    </div>
+
+    <button type="submit" class="btn btn-primary" id="switchSubmit" disabled>执行数据库切换</button>
+</form>
+{% elif switch_locked and switch.status != 'running' %}
+<div class="settings-form">
+    <p class="form-hint" style="color:#a76a12">另一个进程正在执行数据库切换，请等待其完成后再刷新本页。</p>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script nonce="{{ request.state.csp_nonce }}">
+(function () {
+    var typeRadios = document.querySelectorAll('input[name="target_type"]');
+    var sqliteBox = document.getElementById('sqliteBox');
+    var mysqlBox = document.getElementById('mysqlBox');
+    function syncType() {
+        var type = document.querySelector('input[name="target_type"]:checked');
+        var isMysql = type && type.value === 'mysql';
+        if (sqliteBox) sqliteBox.style.display = isMysql ? 'none' : '';
+        if (mysqlBox) mysqlBox.style.display = isMysql ? '' : 'none';
+    }
+    typeRadios.forEach(function (el) { el.addEventListener('change', syncType); });
+    syncType();
+
+    var c1 = document.getElementById('c1');
+    var c2 = document.getElementById('c2');
+    var c3 = document.getElementById('c3');
+    var submit = document.getElementById('switchSubmit');
+    function syncSubmit() {
+        if (!submit) return;
+        submit.disabled = !(c1 && c1.checked && c2 && c2.checked && c3 && c3.value.trim() === '切换');
+    }
+    [c1, c2, c3].forEach(function (el) { if (el) el.addEventListener('input', syncSubmit); });
+    syncSubmit();
+
+    var form = document.getElementById('switchForm');
+    if (form) {
+        form.addEventListener('submit', function (event) {
+            if (!confirm('即将切换数据库：系统会先备份当前数据库，再复制数据并逐表校验，完成后必须重启应用。确定继续？')) {
+                event.preventDefault();
+            }
+        });
+    }
+
+    var statusBox = document.getElementById('switchStatus');
+    if (!statusBox) return;
+    var running = {{ 'true' if switch.status == 'running' else 'false' }};
+    if (!running) return;
+    function poll() {
+        fetch('/admin/settings/database/progress', { headers: { 'Accept': 'application/json' } })
+            .then(function (resp) { return resp.json(); })
+            .then(function (snap) {
+                document.getElementById('switchStep').textContent = snap.step + '（' + snap.percent + '%）';
+                document.getElementById('switchBar').style.width = snap.percent + '%';
+                document.getElementById('switchLog').textContent = (snap.logs || []).join('\n');
+                if (snap.status === 'running') {
+                    setTimeout(poll, 1500);
+                } else {
+                    window.location.reload();
+                }
+            })
+            .catch(function () { setTimeout(poll, 3000); });
+    }
+    setTimeout(poll, 1500);
+})();
+</script>
+{% endblock %}

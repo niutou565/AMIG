@@ -17,7 +17,7 @@ from app.models import (
     get_admin_by_username, update_admin_login_attempts, get_admin_by_id,
     now_iso, parse_dt,
 )
-from app.database import get_db
+from app.database import get_db, upsert_suffix
 from app.config import (
     LOGIN_IP_MAX_ATTEMPTS, LOGIN_IP_WINDOW_MINUTES,
     SESSION_TTL_HOURS, SESSION_IDLE_MINUTES,
@@ -201,8 +201,11 @@ def _cleanup_sessions():
     now = datetime.now(timezone.utc)
     idle_cutoff = now - timedelta(minutes=SESSION_IDLE_MINUTES)
     db = get_db()
+    # 老版本会话的 last_seen_at 为空串：与 get_session 的取值规则保持一致，
+    # 回退用 created_at 判断空闲超时，避免升级后旧会话被误清理。
     db.execute(
-        "DELETE FROM sessions WHERE expires_at <= ? OR last_seen_at <= ?",
+        "DELETE FROM sessions WHERE expires_at <= ? "
+        "OR COALESCE(NULLIF(last_seen_at, ''), created_at) <= ?",
         (
             now.isoformat(timespec="seconds"),
             idle_cutoff.isoformat(timespec="seconds"),
@@ -273,12 +276,22 @@ def record_login_failure(ip: str) -> bool:
     db.execute(
         "INSERT INTO login_rate_limits (`key`, attempts, window_start, updated_at) "
         "VALUES (?, 1, ?, ?) "
-        "ON DUPLICATE KEY UPDATE "
-        "attempts = CASE WHEN login_rate_limits.window_start >= ? "
-        "          THEN login_rate_limits.attempts + 1 ELSE 1 END, "
-        "window_start = CASE WHEN login_rate_limits.window_start >= ? "
-        "          THEN login_rate_limits.window_start ELSE VALUES(window_start) END, "
-        "updated_at = VALUES(updated_at)",
+        + upsert_suffix(
+            "ON DUPLICATE KEY UPDATE "
+            "attempts = CASE WHEN login_rate_limits.window_start >= ? "
+            "          THEN login_rate_limits.attempts + 1 ELSE 1 END, "
+            "window_start = CASE WHEN login_rate_limits.window_start >= ? "
+            "          THEN login_rate_limits.window_start "
+            "          ELSE VALUES(window_start) END, "
+            "updated_at = VALUES(updated_at)",
+            "ON CONFLICT(`key`) DO UPDATE SET "
+            "attempts = CASE WHEN login_rate_limits.window_start >= ? "
+            "          THEN login_rate_limits.attempts + 1 ELSE 1 END, "
+            "window_start = CASE WHEN login_rate_limits.window_start >= ? "
+            "          THEN login_rate_limits.window_start "
+            "          ELSE excluded.window_start END, "
+            "updated_at = excluded.updated_at",
+        ),
         (key, now_iso_value, now_iso_value, cutoff, cutoff),
     )
     db.commit()

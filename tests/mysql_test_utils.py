@@ -60,6 +60,12 @@ def mysql_available():
 
 def require_mysql():
     """没有可用 MySQL 时跳过测试并给出明确原因。"""
+    if database.IS_SQLITE:
+        # 防止 SQLite 模式下这些用例误用默认 data/app.db 并污染真实数据
+        raise unittest.SkipTest(
+            "当前进程数据库后端为 SQLite；MySQL 专用测试已跳过"
+            "（设置 DB_TYPE=mysql 后重跑）"
+        )
     if not mysql_available():
         raise unittest.SkipTest(
             "未检测到可用的 MySQL（请配置 MYSQL_HOST/MYSQL_USER/MYSQL_PASSWORD "

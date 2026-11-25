@@ -64,7 +64,8 @@ if not exist "%SCRIPT_DIR%requirements.txt" (
     exit /b 1
 )
 
-python -c "import fastapi, uvicorn, multipart, PIL, bcrypt, aiofiles, jinja2, httpx, pymysql" >nul 2>&1
+:: 注意：PyMySQL 仅在 DB_TYPE=mysql 时需要，SQLite 用户无需安装
+python -c "import fastapi, uvicorn, multipart, PIL, bcrypt, aiofiles, jinja2, httpx" >nul 2>&1
 if %errorlevel% neq 0 (
     echo [WARN] Dependencies not installed or incomplete, installing now...
     echo        (Using prebuilt wheels, this may take a moment...)
@@ -106,16 +107,17 @@ if not exist "%SCRIPT_DIR%.env" (
     echo [OK] .env config file exists
 )
 
-:: ========== Step 6: Initialize Database (MySQL) ==========
+:: ========== Step 6: Initialize Database (SQLite / MySQL) ==========
 echo.
 echo [*] Initializing database...
 if not exist "%SCRIPT_DIR%data" mkdir "%SCRIPT_DIR%data"
-:: 建表与默认数据初始化是幂等的；MySQL 连接失败时脚本会给出配置提示
+:: 建表与默认数据初始化是幂等的；老版本升级同样走这里（自动补齐表结构）
 python "%SCRIPT_DIR%init_db.py"
 if %errorlevel% neq 0 (
     echo [ERROR] Database initialization failed.
-    echo         Please check MYSQL_HOST / MYSQL_PORT / MYSQL_DATABASE / MYSQL_USER / MYSQL_PASSWORD
-    echo         in .env, and make sure MySQL 8.0+ is running.
+    echo         DB_TYPE=sqlite: check DATABASE_PATH and directory permissions in .env
+    echo         DB_TYPE=mysql : check MYSQL_HOST / MYSQL_PORT / MYSQL_DATABASE / MYSQL_USER / MYSQL_PASSWORD
+    echo         and make sure MySQL 8.0+ is running ^(and PyMySQL is installed^).
     pause
     exit /b 1
 )

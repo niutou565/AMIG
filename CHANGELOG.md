@@ -2,6 +2,43 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)规范。
 
+## [1.2.5] - 2026-11-25
+
+> 合并两条项目线：同一版本同时支持 SQLite 与 MySQL 两种数据库后端；新增图形化 Web 安装向导与后台「切换数据库」（三次确认、保留数据）。
+
+### 双数据库后端
+
+- `DB_TYPE` 支持 `sqlite` / `mysql`；**缺失时默认 sqlite**，保证 1.1.x 老版本用户升级后直接启动即可继续使用原 SQLite 库
+- `app/database.py` 增加 SQLite 连接包装器（WAL、`BEGIN IMMEDIATE`、线程本地连接、锁冲突重试），与 MySQL 连接池共用同一套 `get_db()` / `transaction()` / `Row` 接口
+- 方言差异收敛到助手函数：`upsert_suffix()`、`random_unit_expr()`、`least_expr()`、命名锁（MySQL `GET_LOCK` / SQLite 进程内锁）；models / auth 的 10 处 UPSERT 与随机抽样全部改为按后端生成
+- SQLite 建表/补列/建索引逻辑内置：老库缺 `title/region/status/csrf_token/last_seen_at` 等列、缺 `upload_reservations/cooling` 等表时自动补齐，原数据不变
+- `start.bat` / `start.sh` / `start_bt.sh` 不再强制要求 PyMySQL（仅 MySQL 模式需要），初始化失败提示同时覆盖两种后端
+- 会话清理对 `last_seen_at` 为空的老会话回退使用 `created_at`，避免升级瞬间旧会话被误清
+
+### 图形化安装向导（仅全新安装）
+
+- 新增 `install.py` + `installer/` 包：临时 FastAPI 服务 + 随机令牌（`/install/<token>`，无令牌 404），默认本机打开浏览器
+- `--remote` / `--host 0.0.0.0` 支持宝塔等无浏览器环境：用自己电脑的浏览器访问服务器 IP 完成安装
+- 向导步骤：数据库选择（SQLite/MySQL，MySQL 可实时测试连接）→ 站点配置（HOST/PORT/WORKERS/管理域名/上传目录）→ 管理员账号 → 确认 → 执行
+- 内置前置校验：Python 版本、依赖、磁盘 ≥ 500MB、目录可写、端口占用、私有目录隔离、MySQL 直连与建库权限；失败项给出修复建议
+- 实时进度与日志、步骤回退修改；安装完成生成 `logs/install_report_*.json`，支持一键启动应用自检（GET / 返回 200）
+- 检测到已有安装时提示「老版本直接启动即可升级」，不提供升级向导；重新安装会先备份旧 `.env` 与 SQLite 库，且不清空数据
+
+### 后台「切换数据库」
+
+- 后台「站点设置 → 切换数据库」独立入口，展示当前数据库；切换需**三次确认**（两次勾选 + 输入确认词「切换」）
+- `app/db_migration.py` 双向迁移执行器：目标库必须为空；复制前自动备份来源库（SQLite Online Backup / mysqldump），备份失败立即中止
+- 复制阶段使用来源库只读快照，单事务写入目标库，完成后逐表行数 + 首尾抽样校验；失败不写 `.env`
+- 成功后原子更新 `.env` 的 `DB_TYPE` 与连接参数，页面提示需重启生效（不做热切换）
+- 跨进程文件锁防止并发切换；切换期间上传接口临时拒绝新上传，避免数据只落在旧库
+
+### 测试
+
+- 新增 `tests/sqlite_test_utils.py`、`tests/test_sqlite_backend.py`（建表/UPSERT/事务/命名锁/并发去重）
+- 新增 `tests/test_upgrade_sqlite.py`：模拟 1.1.x 老库直接启动升级，断言数据保留、列/表补齐、业务可用
+- 新增 `tests/test_db_switch.py`：迁移往返、非空目标拒绝、备份与切换锁、`.env` 原子写入、后台三次确认流程
+- 版本号统一为 1.2.5
+
 ## [1.2.0] - 2026-11-25
 
 > 数据库后端由 SQLite 迁移至 MySQL 8.0+。业务功能、接口与安全机制保持不变；旧 SQLite 数据可通过一次性迁移工具完整迁入。

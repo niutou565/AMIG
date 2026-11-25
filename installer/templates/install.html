@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AMIG 安装向导</title>
+<style>
+  :root {
+    --accent: #c9a063;
+    --accent-dark: #a8843f;
+    --bg: #f6f4ef;
+    --card: #ffffff;
+    --text: #2b2b2b;
+    --muted: #7a756c;
+    --border: #e6e1d7;
+    --ok: #2f7d4f;
+    --err: #b4432f;
+    --warn: #a76a12;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    line-height: 1.6;
+  }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 28px 20px 64px; }
+  header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px; }
+  header h1 { font-size: 22px; margin: 0; letter-spacing: .5px; }
+  header .ver { color: var(--muted); font-size: 13px; }
+  .subtitle { color: var(--muted); font-size: 14px; margin: 0 0 20px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px 22px; margin-bottom: 16px;
+  }
+  .banner {
+    border-left: 4px solid var(--accent); background: #fdf9f1;
+    padding: 12px 16px; border-radius: 8px; font-size: 14px; margin-bottom: 16px;
+  }
+  .banner.warn { border-left-color: var(--warn); background: #fdf6e9; }
+  .steps { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 18px; }
+  .step-chip {
+    font-size: 13px; padding: 6px 12px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--muted); background: #fff;
+  }
+  .step-chip.active { border-color: var(--accent); color: var(--accent-dark); font-weight: 600; }
+  .step-chip.done { background: #f2f7f3; border-color: #cfe5d7; color: var(--ok); }
+  h2 { font-size: 17px; margin: 0 0 14px; }
+  h3 { font-size: 14px; margin: 18px 0 8px; color: var(--muted); font-weight: 600; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 4px; }
+  input[type=text], input[type=password], input[type=number] {
+    width: 100%; padding: 9px 11px; border: 1px solid var(--border);
+    border-radius: 8px; font-size: 14px; background: #fff; color: var(--text);
+  }
+  input:focus { outline: 2px solid #e9dcc2; border-color: var(--accent); }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 640px) { .row { grid-template-columns: 1fr; } }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .radios { display: flex; gap: 12px; margin: 8px 0 4px; }
+  .radio-card {
+    flex: 1; border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px 14px; cursor: pointer; background: #fff;
+  }
+  .radio-card.sel { border-color: var(--accent); background: #fdf9f1; }
+  .radio-card strong { display: block; font-size: 14px; }
+  .radio-card span { font-size: 12px; color: var(--muted); }
+  .radio-card input { margin-right: 6px; }
+  .btn {
+    display: inline-block; border: 1px solid var(--border); background: #fff;
+    color: var(--text); padding: 9px 18px; border-radius: 9px; font-size: 14px;
+    cursor: pointer;
+  }
+  .btn:hover { border-color: var(--accent); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.primary:hover { background: var(--accent-dark); }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .btn-row { display: flex; justify-content: space-between; margin-top: 20px; gap: 10px; }
+  .checks { margin: 10px 0 0; padding: 0; list-style: none; }
+  .checks li {
+    display: flex; gap: 10px; padding: 8px 0; border-bottom: 1px dashed var(--border);
+    font-size: 13px;
+  }
+  .checks li:last-child { border-bottom: none; }
+  .tag { flex: 0 0 52px; font-weight: 600; font-size: 12px; }
+  .tag.ok { color: var(--ok); } .tag.bad { color: var(--err); }
+  .detail { color: var(--text); }
+  .fix { color: var(--warn); font-size: 12px; display: block; }
+  .error-box {
+    background: #fbf0ed; border: 1px solid #f0d2ca; color: var(--err);
+    padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-top: 12px;
+    white-space: pre-wrap;
+  }
+  .progress {
+    height: 10px; background: #eee9df; border-radius: 999px; overflow: hidden; margin: 14px 0 8px;
+  }
+  .progress > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .4s; }
+  .log {
+    background: #23211d; color: #e8e2d6; border-radius: 8px; padding: 12px 14px;
+    font-family: Consolas, "Courier New", monospace; font-size: 12px;
+    max-height: 260px; overflow: auto; white-space: pre-wrap; margin-top: 12px;
+  }
+  .summary { font-size: 14px; }
+  .summary dt { color: var(--muted); font-size: 12px; margin-top: 10px; }
+  .summary dd { margin: 2px 0 0; word-break: break-all; }
+  .hidden { display: none !important; }
+  .checkline { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-top: 14px; }
+  code { background: #f1ece1; padding: 1px 6px; border-radius: 5px; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>AMIG 安装向导</h1>
+    <span class="ver">v1.2.5</span>
+  </header>
+  <p class="subtitle">全新安装：选择数据库、配置站点与管理员账号，全程图形化完成。</p>
+
+  <div id="existingBanner" class="banner warn hidden"></div>
+
+  <div class="steps" id="stepChips"></div>
+
+  <div class="card" id="panel-db">
+    <h2>1. 选择数据库</h2>
+    <div class="radios">
+      <label class="radio-card sel" id="cardSqlite">
+        <input type="radio" name="dbtype" value="sqlite" checked>
+        <strong>SQLite</strong><span>单文件、零依赖，适合小站与宝塔简单部署</span>
+      </label>
+      <label class="radio-card" id="cardMysql">
+        <input type="radio" name="dbtype" value="mysql">
+        <strong>MySQL</strong><span>MySQL 8.0+，适合多 worker / 高并发部署</span>
+      </label>
+    </div>
+    <div id="sqliteFields">
+      <label>数据库文件路径</label>
+      <input type="text" id="sqlitePath" value="data/app.db">
+      <div class="hint">相对路径按项目根目录解析；目录不存在会自动创建。</div>
+    </div>
+    <div id="mysqlFields" class="hidden">
+      <div class="row">
+        <div><label>主机</label><input type="text" id="myHost" value="127.0.0.1"></div>
+        <div><label>端口</label><input type="number" id="myPort" value="3306"></div>
+      </div>
+      <div class="row">
+        <div><label>数据库名</label><input type="text" id="myDb" value="amig"></div>
+        <div><label>用户名</label><input type="text" id="myUser" value="amig"></div>
+      </div>
+      <label>密码</label>
+      <input type="password" id="myPass" autocomplete="new-password">
+      <div class="hint">该账号需要具备建库/建表权限；密码只写入本机 .env。</div>
+    </div>
+    <div style="margin-top:14px">
+      <button class="btn" id="testDbBtn" type="button">测试数据库连接</button>
+    </div>
+    <ul class="checks" id="dbChecks"></ul>
+    <div class="error-box hidden" id="dbError"></div>
+    <div class="btn-row"><span></span><button class="btn primary" id="dbNext">下一步</button></div>
+  </div>
+
+  <div class="card hidden" id="panel-site">
+    <h2>2. 站点配置</h2>
+    <div class="row">
+      <div><label>监听地址 HOST</label><input type="text" id="sHost" value="127.0.0.1"></div>
+      <div><label>服务端口 PORT</label><input type="number" id="sPort" value="8000"></div>
+    </div>
+    <div class="row">
+      <div><label>Worker 数</label><input type="number" id="sWorkers" value="1"></div>
+      <div><label>管理域名 ADMIN_DOMAIN（可留空）</label><input type="text" id="sDomain" placeholder="admin.example.com"></div>
+    </div>
+    <div class="hint">SQLite 建议 Worker=1（上传额度锁为进程内锁）；生产环境建议 HOST=127.0.0.1 并由 Nginx 反向代理。</div>
+    <div class="row" style="margin-top:6px">
+      <div><label>公开上传目录</label><input type="text" id="sUploads"></div>
+      <div><label>私有上传目录</label><input type="text" id="sPrivate"></div>
+    </div>
+    <div class="hint">私有目录用于待审核图片，必须放在 Web 无法直接访问的位置。</div>
+    <div class="error-box hidden" id="siteError"></div>
+    <div class="btn-row"><button class="btn" data-back="db">上一步</button><button class="btn primary" id="siteNext">下一步</button></div>
+  </div>
+
+  <div class="card hidden" id="panel-admin">
+    <h2>3. 管理员账号</h2>
+    <label>用户名</label>
+    <input type="text" id="aUser" value="admin">
+    <label>密码</label>
+    <input type="password" id="aPass" autocomplete="new-password">
+    <div class="hint">至少 12 个字符，不能是常见弱口令或重复模式。</div>
+    <label>确认密码</label>
+    <input type="password" id="aPass2" autocomplete="new-password">
+    <div class="error-box hidden" id="adminError"></div>
+    <div class="btn-row"><button class="btn" data-back="site">上一步</button><button class="btn primary" id="adminNext">下一步</button></div>
+  </div>
+
+  <div class="card hidden" id="panel-confirm">
+    <h2>4. 确认安装</h2>
+    <dl class="summary" id="summary"></dl>
+    <label class="checkline" id="forceLine" style="display:none">
+      <input type="checkbox" id="forceChk"> 覆盖已有安装（会先备份旧配置与数据库，不清空数据）
+    </label>
+    <div class="error-box hidden" id="confirmError"></div>
+    <div class="btn-row"><button class="btn" data-back="admin">上一步</button><button class="btn primary" id="startBtn">开始安装</button></div>
+  </div>
+
+  <div class="card hidden" id="panel-install">
+    <h2>5. 安装进度</h2>
+    <div class="progress"><i id="bar"></i></div>
+    <div style="font-size:13px;color:var(--muted)" id="stepText">等待开始…</div>
+    <div class="log" id="logBox"></div>
+    <div class="error-box hidden" id="installError"></div>
+
+    <div id="resultBox" class="hidden">
+      <h3>安装结果</h3>
+      <ul class="checks" id="resultChecks"></ul>
+      <div style="margin-top:14px">
+        <button class="btn" id="verifyHttpBtn" type="button">验证核心功能（启动一次应用）</button>
+      </div>
+      <div class="error-box hidden" id="verifyError"></div>
+      <ul class="checks" id="verifyChecks"></ul>
+      <div class="banner" style="margin-top:16px">
+        安装完成。请按 Ctrl+C 结束安装向导，然后执行 <code>python run.py</code>（或 start.sh / start.bat）启动站点。<br>
+        后续如需切换数据库，请登录后台「站点设置 → 切换数据库」（需三次确认，自动备份并保留数据）。
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const TOKEN = "__TOKEN__";
+const api = (path) => `/install/${TOKEN}/api/${path}`;
+const state = { step: "db", order: ["db", "site", "admin", "confirm", "install"], existing: null };
+const $ = (id) => document.getElementById(id);
+
+async function call(path, body) {
+  const resp = await fetch(api(path), {
+    method: body === undefined ? "GET" : "POST",
+    headers: { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  let data = {};
+  try { data = await resp.json(); } catch (e) { data = {}; }
+  if (!resp.ok && !data.error) data.error = `请求失败（HTTP ${resp.status}）`;
+  return data;
+}
+
+function dbType() {
+  return document.querySelector('input[name=dbtype]:checked').value;
+}
+
+function collect() {
+  return {
+    db: dbType() === "sqlite"
+      ? { type: "sqlite", database_path: $("sqlitePath").value.trim() }
+      : { type: "mysql", host: $("myHost").value.trim(), port: parseInt($("myPort").value, 10),
+          database: $("myDb").value.trim(), user: $("myUser").value.trim(), password: $("myPass").value },
+    site: { host: $("sHost").value.trim(), port: parseInt($("sPort").value, 10),
+            workers: parseInt($("sWorkers").value, 10), admin_domain: $("sDomain").value.trim(),
+            uploads_dir: $("sUploads").value.trim(), private_uploads_dir: $("sPrivate").value.trim() },
+    admin: { username: $("aUser").value.trim(), password: $("aPass").value,
+             password_confirm: $("aPass2").value },
+    force_reinstall: $("forceChk").checked,
+  };
+}
+
+function renderChips() {
+  const names = { db: "选择数据库", site: "站点配置", admin: "管理员", confirm: "确认", install: "安装" };
+  const idx = state.order.indexOf(state.step);
+  $("stepChips").innerHTML = "";
+  state.order.forEach((key, i) => {
+    const el = document.createElement("span");
+    el.className = "step-chip" + (key === state.step ? " active" : (i < idx ? " done" : ""));
+    el.textContent = (i + 1) + ". " + names[key];
+    $("stepChips").appendChild(el);
+  });
+}
+
+function goto(step) {
+  state.step = step;
+  state.order.forEach((key) => $("panel-" + key).classList.add("hidden"));
+  $("panel-" + step).classList.remove("hidden");
+  renderChips();
+  if (step === "confirm") renderSummary();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function renderChecks(listEl, checks) {
+  listEl.innerHTML = "";
+  (checks || []).forEach((item) => {
+    const li = document.createElement("li");
+    const tag = document.createElement("span");
+    tag.className = "tag " + (item.ok ? "ok" : "bad");
+    tag.textContent = item.ok ? "通过" : "失败";
+    const detail = document.createElement("span");
+    detail.className = "detail";
+    detail.textContent = item.name + "：" + item.detail;
+    if (!item.ok && item.hint) {
+      const fix = document.createElement("span");
+      fix.className = "fix";
+      fix.textContent = "修复建议：" + item.hint;
+      detail.appendChild(fix);
+    }
+    li.appendChild(tag); li.appendChild(detail);
+    listEl.appendChild(li);
+  });
+}
+
+function renderSummary() {
+  const d = collect();
+  const dbText = d.db.type === "sqlite"
+    ? "SQLite：" + d.db.database_path
+    : `MySQL：${d.db.user}@${d.db.host}:${d.db.port}/${d.db.database}`;
+  const items = [
+    ["数据库", dbText],
+    ["监听地址", `${d.site.host}:${d.site.port}（${d.site.workers} worker）`],
+    ["管理域名", d.site.admin_domain || "（未设置，仅本机可访问后台）"],
+    ["公开上传目录", d.site.uploads_dir],
+    ["私有上传目录", d.site.private_uploads_dir],
+    ["管理员用户名", d.admin.username],
+  ];
+  $("summary").innerHTML = "";
+  items.forEach(([k, v]) => {
+    const dt = document.createElement("dt"); dt.textContent = k;
+    const dd = document.createElement("dd"); dd.textContent = v;
+    $("summary").appendChild(dt); $("summary").appendChild(dd);
+  });
+  $("forceLine").style.display = state.existing && state.existing.installed ? "flex" : "none";
+}
+
+/* ── 数据库步骤 ── */
+document.querySelectorAll('input[name=dbtype]').forEach((el) => {
+  el.addEventListener("change", () => {
+    const isSqlite = dbType() === "sqlite";
+    $("sqliteFields").classList.toggle("hidden", !isSqlite);
+    $("mysqlFields").classList.toggle("hidden", isSqlite);
+    $("cardSqlite").classList.toggle("sel", isSqlite);
+    $("cardMysql").classList.toggle("sel", !isSqlite);
+    $("dbChecks").innerHTML = "";
+  });
+});
+
+$("testDbBtn").addEventListener("click", async () => {
+  $("dbError").classList.add("hidden");
+  const result = await call("test-db", { db: collect().db });
+  if (result.error) { $("dbError").textContent = result.error; $("dbError").classList.remove("hidden"); }
+  renderChecks($("dbChecks"), result.checks);
+});
+
+$("dbNext").addEventListener("click", () => {
+  const d = collect().db;
+  if (d.type === "sqlite" && !d.database_path) { showError("dbError", "请填写 SQLite 数据库路径"); return; }
+  if (d.type === "mysql" && (!d.host || !d.database || !d.user)) {
+    showError("dbError", "请填写 MySQL 主机、数据库名与用户名"); return;
+  }
+  goto("site");
+});
+
+/* ── 站点步骤 ── */
+$("siteNext").addEventListener("click", () => {
+  const s = collect().site;
+  if (!(s.port >= 1 && s.port <= 65535)) { showError("siteError", "服务端口必须在 1-65535 之间"); return; }
+  if (!(s.workers >= 1 && s.workers <= 8)) { showError("siteError", "Worker 数必须在 1-8 之间"); return; }
+  if (!s.uploads_dir || !s.private_uploads_dir) { showError("siteError", "上传目录不能为空"); return; }
+  $("siteError").classList.add("hidden");
+  goto("admin");
+});
+
+/* ── 管理员步骤 ── */
+$("adminNext").addEventListener("click", () => {
+  const a = collect().admin;
+  if (!/^[A-Za-z0-9_.-]{3,32}$/.test(a.username)) {
+    showError("adminError", "用户名需为 3-32 位字母、数字、下划线、点或短横线"); return;
+  }
+  if (a.password.length < 12) { showError("adminError", "密码长度不能少于 12 个字符"); return; }
+  if (a.password !== a.password_confirm) { showError("adminError", "两次输入的密码不一致"); return; }
+  $("adminError").classList.add("hidden");
+  goto("confirm");
+});
+
+function showError(id, message) {
+  const el = $(id);
+  el.textContent = message;
+  el.classList.remove("hidden");
+}
+
+document.querySelectorAll("[data-back]").forEach((btn) => {
+  btn.addEventListener("click", () => goto(btn.dataset.back));
+});
+
+/* ── 开始安装 ── */
+$("startBtn").addEventListener("click", async () => {
+  $("confirmError").classList.add("hidden");
+  $("startBtn").disabled = true;
+  const payload = collect();
+  const result = await call("install", payload);
+  if (!result.ok) {
+    $("startBtn").disabled = false;
+    showError("confirmError", result.error || "安装启动失败");
+    return;
+  }
+  goto("install");
+  pollProgress();
+});
+
+let pollTimer = null;
+async function pollProgress() {
+  const snap = await call("progress");
+  $("bar").style.width = (snap.percent || 0) + "%";
+  $("stepText").textContent = `${snap.step || ""}（${snap.percent || 0}%）`;
+  $("logBox").textContent = (snap.logs || []).join("\n");
+  $("logBox").scrollTop = $("logBox").scrollHeight;
+
+  if (snap.status === "failed") {
+    $("startBtn").disabled = false;
+    $("installError").textContent = "安装失败：" + (snap.error || "未知错误");
+    $("installError").classList.remove("hidden");
+    renderChecks($("resultChecks"), snap.checks);
+    $("resultBox").classList.remove("hidden");
+    return;
+  }
+  if (snap.status === "success" && snap.report) {
+    renderChecks($("resultChecks"), snap.report.checks);
+    $("resultBox").classList.remove("hidden");
+    $("stepText").textContent = "安装完成（100%）";
+    return;
+  }
+  pollTimer = setTimeout(pollProgress, 1000);
+}
+
+$("verifyHttpBtn").addEventListener("click", async () => {
+  $("verifyError").classList.add("hidden");
+  $("verifyHttpBtn").disabled = true;
+  $("verifyHttpBtn").textContent = "正在启动应用验证…";
+  const result = await call("verify-http", {});
+  $("verifyHttpBtn").disabled = false;
+  $("verifyHttpBtn").textContent = "验证核心功能（启动一次应用）";
+  if (result.error) { showError("verifyError", result.error); return; }
+  renderChecks($("verifyChecks"), [result.check]);
+});
+
+/* ── 初始化 ── */
+(async function init() {
+  const status = await call("status");
+  if (status.default_site) {
+    $("sHost").value = status.default_site.host;
+    $("sPort").value = status.default_site.port;
+    $("sWorkers").value = status.default_site.workers;
+    $("sUploads").value = status.default_site.uploads_dir;
+    $("sPrivate").value = status.default_site.private_uploads_dir;
+  }
+  state.existing = status.existing;
+  if (status.existing && status.existing.installed) {
+    const banner = $("existingBanner");
+    banner.innerHTML = "";
+    const title = document.createElement("strong");
+    title.textContent = "检测到已有安装：";
+    banner.appendChild(title);
+    banner.appendChild(document.createTextNode(
+      (status.existing.reason || "") + "（" + (status.existing.database || "") + "）。" +
+      "老版本升级无需运行安装向导：直接启动应用即可自动补齐表结构并保留原数据；" +
+      "数据库切换请登录后台管理操作。如确需全新覆盖安装，请在「确认安装」页勾选覆盖选项。"
+    ));
+    banner.classList.remove("hidden");
+    $("forceLine").style.display = "flex";
+  }
+  const snap = status.progress;
+  if (snap && snap.status === "running") {
+    goto("install");
+    pollProgress();
+  }
+  renderChips();
+})();
+</script>
+</body>
+</html>
