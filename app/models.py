@@ -8,7 +8,8 @@ from datetime import datetime, timezone, timedelta
 from app.database import (
     get_db, transaction, IntegrityError, DatabaseError,
     acquire_named_lock, release_named_lock,
-    upsert_suffix, random_unit_expr, least_expr,
+    upsert_suffix, random_unit_expr, least_expr, greatest_expr,
+    IS_SQLITE,
 )
 from app.config import VIEW_DEDUP_WINDOW
 
@@ -429,7 +430,8 @@ def increment_like_count(image_id):
 def decrement_like_count(image_id, count=1):
     db = get_db()
     db.execute(
-        "UPDATE images SET like_count = GREATEST(0, like_count - ?) WHERE id=?",
+        # SQLite 没有 GREATEST 函数，通过方言助手生成对应表达式
+        f"UPDATE images SET like_count = {greatest_expr('0', 'like_count - ?')} WHERE id=?",
         (count, image_id)
     )
     db.commit()
@@ -565,7 +567,8 @@ def delete_likes_by_ids(like_ids):
         conn.execute(f"DELETE FROM likes WHERE id IN ({id_list})", like_ids)
         for row in likes:
             conn.execute(
-                "UPDATE images SET like_count = GREATEST(0, like_count - ?) WHERE id=?",
+                # SQLite 没有 GREATEST 函数，通过方言助手生成对应表达式
+                f"UPDATE images SET like_count = {greatest_expr('0', 'like_count - ?')} WHERE id=?",
                 (row["cnt"], row["image_id"]),
             )
 
@@ -1143,9 +1146,10 @@ def reserve_upload_quota(ip, ua_hash_val):
         MYSQL_QUOTA_LOCK_TIMEOUT,
     )
 
-    # 后台正在切换数据库时拒绝新的上传，避免数据只写入即将被替换的旧库
-    from app.db_migration import switch_in_progress
-    if switch_in_progress():
+    # 后台正在切换数据库（或切换完成等待重启）时拒绝新的上传，
+    # 避免数据只写入即将被替换的旧库
+    from app.db_migration import switch_blocking_writes
+    if switch_blocking_writes():
         return (False, "系统正在切换数据库，请稍后再试", None)
 
     conn = get_db()
@@ -1323,10 +1327,19 @@ def batch_update_status(ids, status, admin_id, admin_name):
 
 def get_recent_upload_ips(limit=50):
     """获取最近上传 IP 的统计，点赞数通过子查询一并返回，避免 N+1 查询"""
+    # ANY_VALUE 是 MySQL 8 专属函数；SQLite 不启用 ONLY_FULL_GROUP_BY，
+    # 可直接选取非聚合列，两种后端行为一致。
+    if IS_SQLITE:
+        province_sel, city_sel = "province as province", "city as city"
+    else:
+        province_sel, city_sel = (
+            "ANY_VALUE(province) as province",
+            "ANY_VALUE(city) as city",
+        )
     return get_db().execute(
-        """SELECT ip,
-           ANY_VALUE(province) as province,
-           ANY_VALUE(city) as city,
+        f"""SELECT ip,
+           {province_sel},
+           {city_sel},
            COUNT(*) as upload_count,
            SUM(CASE WHEN status='approved' THEN 1 ELSE 0 END) as approved,
            SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending,

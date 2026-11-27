@@ -18,6 +18,7 @@ from app.models import (
     increment_daily_stat, today_str,
 )
 from app.stats import get_top_cached
+from app.database import DatabaseSwitchInProgressError
 from app.ip_geo import get_client_ip, get_ip_location, get_ip_region
 from app.limiter import reserve_upload_slot
 from app.models import release_upload_reservation
@@ -213,10 +214,13 @@ async def image_detail(request: Request, image_id: int):
     ip = get_client_ip(request)
     ua_val = request.headers.get("user-agent", "")
 
-    # 浏览计数（去重）
-    if should_count_view(image_id, ip):
-        increment_view(image_id)
-        increment_daily_stat(today_str(), "view_count")
+    # 浏览计数（去重）；数据库切换期间跳过计数，保证图片页仍可正常浏览
+    try:
+        if should_count_view(image_id, ip):
+            increment_view(image_id)
+            increment_daily_stat(today_str(), "view_count")
+    except DatabaseSwitchInProgressError:
+        pass
 
     # 是否已赞
     ctx["has_liked"] = has_liked(image_id, ip, ua_hash(ua_val))

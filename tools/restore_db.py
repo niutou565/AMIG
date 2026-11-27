@@ -23,6 +23,7 @@
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 import tarfile
@@ -348,10 +349,18 @@ def restore_uploads(backup_path, force):
                 if len(parts) != 2 or parts[0] not in staging:
                     continue
                 relative = parts[1]
-                # 拒绝越界路径，避免归档中的 ../ 写到目录外
-                if not relative or relative.startswith("/") or ".." in relative.split("/"):
+                segs = relative.split("/")
+                # 拒绝越界路径：绝对路径、.. 段、Windows 盘符（os.path.join 遇
+                # 到 "C:" 这类盘符组件会丢弃前缀逃出 staging 目录）与流分隔符
+                if (
+                    not relative
+                    or relative.startswith("/")
+                    or ".." in segs
+                    or re.match(r"^[A-Za-z]:", segs[0])
+                    or ":" in relative
+                ):
                     continue
-                dest = os.path.join(staging[parts[0]], *relative.split("/"))
+                dest = os.path.join(staging[parts[0]], *segs)
                 os.makedirs(os.path.dirname(dest), exist_ok=True)
                 src = tar.extractfile(member)
                 if src is None:

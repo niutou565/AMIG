@@ -12,7 +12,7 @@ from app.config import (
     log_deployment_warnings,
 )
 from app.admin_domains import ensure_admin_domain_initialized
-from app.database import init_db, close_all_db
+from app.database import init_db, close_all_db, DatabaseSwitchInProgressError
 from app.middleware import (
     AdminDomainMiddleware, CSRFMiddleware, DBConnectionMiddleware,
     SecurityHeadersMiddleware, UploadBodyLimitMiddleware, load_sensitive_words,
@@ -70,6 +70,16 @@ if static_dir.exists():
 # （见 app/routes/media.py）。Nginx 也必须把 /uploads 反代到应用，不能配置 alias。
 
 # Exception handlers
+@app.exception_handler(DatabaseSwitchInProgressError)
+async def db_switch_in_progress_handler(request: Request, exc):
+    """数据库切换期间统一拒绝业务写入（点赞/审核/设置/日志等全部写入口）。"""
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "数据库切换进行中，写入已暂停，请稍后重试"},
+        headers={"Retry-After": "60"},
+    )
+
+
 @app.exception_handler(404)
 async def not_found_handler(request: Request, exc):
     return templates.TemplateResponse(request, "404.html", {}, status_code=404)
@@ -97,6 +107,10 @@ app.include_router(media.router)
 @app.on_event("startup")
 async def startup():
     log_deployment_warnings()
+    # 新进程已按切换后的 .env 连接新库，清除「等待重启」标记恢复业务写入。
+    # 若旧进程在切换后未被重启，该标记 30 分钟后自动过期（见 db_migration）。
+    from app import db_migration
+    db_migration.clear_pending_restart()
     init_db()
     # 仅首次运行/旧库迁移时用 .env 初始化管理域名；之后数据库为唯一权威配置
     ensure_admin_domain_initialized()

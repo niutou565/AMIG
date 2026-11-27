@@ -84,6 +84,38 @@ _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_$]+$")
 _DEADLOCK_RETRY_LIMIT = 3
 
 
+# ── 数据库切换期间的写入守卫 ─────────────────────────────────────────
+
+
+class DatabaseSwitchInProgressError(DatabaseError):
+    """数据库切换进行中（或切换成功等待重启），业务写入被临时拒绝。"""
+
+
+# 仅匹配会修改数据的语句；SELECT / PRAGMA / BEGIN / COMMIT / SAVEPOINT 不受影响
+_WRITE_STMT_RE = re.compile(
+    r"^\s*(INSERT|UPDATE|DELETE|REPLACE|CREATE|ALTER|DROP|TRUNCATE|RENAME)\b",
+    re.IGNORECASE,
+)
+
+
+def _assert_writable(sql: str) -> None:
+    """切换期间拒绝业务写入。
+
+    守卫下沉到连接层：业务模块（点赞、浏览量、统计、审核、封禁、设置、
+    操作日志等）无需逐个改造，任何经 get_db() 的写语句都会被统一拦截。
+    迁移器使用独立的适配器连接，不经过这里，因此切换流程自身不受影响。
+    """
+    if not _WRITE_STMT_RE.match(sql):
+        return
+    # 延迟导入：db_migration 在模块级依赖本模块，避免循环导入
+    from app import db_migration
+
+    if db_migration.switch_blocking_writes():
+        raise DatabaseSwitchInProgressError(
+            "数据库切换进行中，写入已暂停，请稍后重试"
+        )
+
+
 # ── 行对象：兼容 sqlite3.Row 的访问方式 ───────────────────────────────
 
 
@@ -187,6 +219,7 @@ class ConnectionWrapper:
     def execute(self, sql, params=()):
         if self._closed:
             raise DatabaseError("数据库连接已关闭，不能执行查询")
+        _assert_writable(sql)
         sql = _translate_placeholders(sql)
         # 无参数时传 None，避免 PyMySQL 对 SQL 中的字面量 % 做格式化
         # （如 LIKE '%关键词%' 这类不带参数的检索语句）
@@ -356,6 +389,7 @@ class SqliteConnection:
     def execute(self, sql, params=()):
         if self._closed:
             raise DatabaseError("数据库连接已关闭，不能执行查询")
+        _assert_writable(sql)
         start = time.monotonic()
         attempt = 0
         while True:
@@ -793,6 +827,11 @@ def random_unit_expr() -> str:
 def least_expr(a: str, b: str) -> str:
     """返回两者取小的 SQL 表达式（MySQL 用 LEAST，SQLite 用标量 MIN）。"""
     return f"MIN({a}, {b})" if IS_SQLITE else f"LEAST({a}, {b})"
+
+
+def greatest_expr(a: str, b: str) -> str:
+    """返回两者取大的 SQL 表达式（MySQL 用 GREATEST，SQLite 用标量 MAX）。"""
+    return f"MAX({a}, {b})" if IS_SQLITE else f"GREATEST({a}, {b})"
 
 
 # ── 表结构初始化 ─────────────────────────────────────────────────────

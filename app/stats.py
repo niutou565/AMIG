@@ -8,6 +8,7 @@ from app.models import (
     ensure_daily_stats, today_str
 )
 from app.config import DEFAULT_TOP_WINDOW_DAYS, DEFAULT_TOP_SHOW_COUNT, TOP_CACHE_TTL
+from app.database import DatabaseSwitchInProgressError
 
 # 热度榜缓存 {cache_key: (data, timestamp)}
 _top_cache = {}
@@ -44,7 +45,11 @@ def invalidate_top_cache():
 def get_dashboard_data():
     """获取仪表盘数据"""
     today = today_str()
-    ensure_daily_stats(today)
+    try:
+        ensure_daily_stats(today)
+    except DatabaseSwitchInProgressError:
+        # 数据库切换期间跳过日统计初始化，仪表盘仍展示已有数据
+        pass
     today_stats = get_daily_stats(today)
 
     pending = count_images_by_status("pending")

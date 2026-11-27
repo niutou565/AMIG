@@ -14,6 +14,7 @@ REPEATABLE READ + CONSISTENT SNAPSHOT），保证复制期间业务写入不会�
 import os
 import re
 import sqlite3
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -324,19 +325,36 @@ def test_connection(db_cfg: dict) -> tuple:
         return False, f"连接失败：{exc}"
 
 
-# ── 切换锁：防止多个 worker / 多个管理员同时执行切换 ─────────────────
+# ── 切换锁与写入守卫状态 ─────────────────────────────────────────────
 
 _SWITCH_LOCK_NAME = ".db_switch.lock"
+# 切换成功、等待旧进程重启期间的状态文件：旧进程据此持续拒绝业务写入，
+# 避免重启前的写入落在即将被替换的旧库上而丢失。
+_SWITCH_PENDING_RESTART_NAME = ".db_switch.pending_restart"
 _SWITCH_LOCK_STALE_SECONDS = 1800
+
+# 写守卫状态缓存：仅缓存「未切换」这一负结果（1 秒），把每条写语句的文件
+# 探测开销摊薄；命中切换状态时不缓存，锁释放后立即恢复写入。
+_WRITE_GUARD_CACHE_TTL = 1.0
+
+# 切换开始后等待各 worker 的守卫缓存失效，再开始快照，消除「锁已建立但
+# 其他进程仍按缓存放行」的残余窗口。测试可置 0 跳过等待。
+_GUARD_PROPAGATION_SECONDS = 1.1
+
+_write_guard_cache = {"checked_at": 0.0, "blocking": False}
+_write_guard_cache_lock = threading.Lock()
 
 
 def switch_lock_path() -> str:
     return os.path.join(str(config.BACKUP_DIR), _SWITCH_LOCK_NAME)
 
 
-def switch_in_progress() -> bool:
-    """是否有数据库切换任务正在执行（上传接口据此临时拒绝写入）。"""
-    path = switch_lock_path()
+def switch_pending_restart_path() -> str:
+    return os.path.join(str(config.BACKUP_DIR), _SWITCH_PENDING_RESTART_NAME)
+
+
+def _probe_state_file(path: str) -> bool:
+    """探测状态文件：存在且未过期返回 True；过期则清理并返回 False。"""
     if not os.path.exists(path):
         return False
     try:
@@ -344,12 +362,73 @@ def switch_in_progress() -> bool:
             os.unlink(path)
             return False
     except OSError:
+        # 并发删除（Windows 下多线程 unlink 竞态）或权限问题：
+        # 按「不在切换中」处理，避免误拦全部业务写入
         return False
     return True
 
 
+def switch_in_progress() -> bool:
+    """是否有数据库切换任务正在执行（上传接口据此临时拒绝写入）。"""
+    return _probe_state_file(switch_lock_path())
+
+
+def switch_pending_restart() -> bool:
+    """是否处于「切换成功、等待重启」状态。"""
+    return _probe_state_file(switch_pending_restart_path())
+
+
+def switch_blocking_writes() -> bool:
+    """当前是否应拒绝业务写入（切换进行中，或切换成功等待重启）。"""
+    now = time.monotonic()
+    with _write_guard_cache_lock:
+        if (not _write_guard_cache["blocking"]
+                and now - _write_guard_cache["checked_at"] < _WRITE_GUARD_CACHE_TTL):
+            return False
+    blocking = switch_in_progress() or switch_pending_restart()
+    with _write_guard_cache_lock:
+        _write_guard_cache["checked_at"] = time.monotonic()
+        _write_guard_cache["blocking"] = blocking
+    return blocking
+
+
+def reset_write_guard_cache():
+    """清空写守卫缓存（测试辅助，或进程启动后立即生效的场景）。"""
+    with _write_guard_cache_lock:
+        _write_guard_cache["checked_at"] = 0.0
+        _write_guard_cache["blocking"] = False
+
+
+def mark_pending_restart():
+    """标记「切换成功、等待重启」：旧进程在重启前持续拒绝业务写入。"""
+    path = switch_pending_restart_path()
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(
+                f"pid={os.getpid()} at={datetime.now(timezone.utc).isoformat()}\n"
+            )
+    except OSError as exc:
+        raise MigrationError(f"无法创建切换等待重启标记，已中止切换：{exc}")
+    reset_write_guard_cache()
+
+
+def clear_pending_restart():
+    """清除「等待重启」标记（新进程启动后或切换失败回滚时调用）。"""
+    try:
+        os.unlink(switch_pending_restart_path())
+    except OSError:
+        pass
+    reset_write_guard_cache()
+
+
 def acquire_switch_lock() -> bool:
     """获取跨进程切换锁（文件独占创建），失败返回 False。"""
+    if switch_pending_restart():
+        # 上一次切换已成功但尚未重启：禁止叠加新的切换任务
+        return False
     path = switch_lock_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     try:
@@ -365,6 +444,8 @@ def acquire_switch_lock() -> bool:
         return acquire_switch_lock()
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(f"pid={os.getpid()} at={datetime.now(timezone.utc).isoformat()}\n")
+    # 锁刚建立：本进程立即生效，其他进程最迟在缓存 TTL 后生效
+    reset_write_guard_cache()
     return True
 
 
@@ -373,6 +454,7 @@ def release_switch_lock():
         os.unlink(switch_lock_path())
     except OSError:
         pass
+    reset_write_guard_cache()
 
 
 # ── 备份 ─────────────────────────────────────────────────────────────
@@ -675,6 +757,9 @@ def switch_database(target: dict, env_path: str = None, progress=None) -> dict:
 
     if progress:
         progress("backup", None, 0)
+    # 等各 worker 的写守卫缓存过期后再做快照，确保快照开始后没有写入被放行
+    if _GUARD_PROPAGATION_SECONDS > 0:
+        time.sleep(_GUARD_PROPAGATION_SECONDS)
     backup_path = backup_source(source)
 
     report = migrate(source, target, progress=progress)
@@ -683,6 +768,41 @@ def switch_database(target: dict, env_path: str = None, progress=None) -> dict:
 
     if progress:
         progress("env", None, 0)
-    update_env_file(env_path, env_updates_for_target(target))
+    # 先立「等待重启」标记再写 .env：
+    # - 标记失败 → 抛错且 .env 未变，旧库继续可用（写入稍后自动恢复）
+    # - .env 写入失败 → 清除标记，回滚到「未切换」状态
+    mark_pending_restart()
+    try:
+        update_env_file(env_path, env_updates_for_target(target))
+    except BaseException:
+        clear_pending_restart()
+        raise
     report["env_path"] = env_path
     return report
+
+
+def insert_admin_log_into_target(target: dict, admin_id, admin_name: str,
+                                 action: str, detail: str = "") -> None:
+    """把切换操作的审计日志直接写入目标库。
+
+    切换成功后当前进程仍连着旧库且写入已被守卫拒绝，普通业务写入无法落库；
+    切换这条记录本身必须进入新库，否则重启后审计链断裂。
+    """
+    cfg = normalize_target(target)
+    if cfg["db_type"] == "mysql":
+        adapter = _MysqlAdapter(cfg)
+    else:
+        adapter = _SqliteAdapter(cfg["database_path"])
+    try:
+        cols = "(admin_id, admin_name, action, detail, target, ip, created_at)"
+        ph = ", ".join([adapter.ph] * 7)
+        adapter.execute(
+            f"INSERT INTO admin_logs {cols} VALUES ({ph})",
+            (
+                admin_id, admin_name, action, detail, "",
+                "", datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            ),
+        )
+        adapter.commit()
+    finally:
+        adapter.close()

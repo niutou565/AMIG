@@ -20,6 +20,7 @@ from app.database import init_db, get_db
 from app.models import now_iso, today_str
 from app.admin_domains import ensure_admin_domain_initialized, normalize_admin_domains
 from app.config import ADMIN_DOMAIN
+from app.password_policy import validate_password
 
 
 def create_default_admin(db, username=None, password=None):
@@ -30,6 +31,11 @@ def create_default_admin(db, username=None, password=None):
     if not password:
         password = secrets.token_hex(16)
         generated = True
+    else:
+        # 显式指定的密码同样必须满足站点密码策略，避免安装出弱口令管理员
+        policy_error = validate_password(password)
+        if policy_error:
+            raise SystemExit(f"[初始化失败] 管理员密码不满足密码策略：{policy_error}")
     password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
     existing = db.execute("SELECT id FROM admins WHERE username=?", (username,)).fetchone()
     if existing:

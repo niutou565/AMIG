@@ -38,6 +38,7 @@ from app.admin_domains import get_request_host, is_loopback_host, normalize_admi
 from app import image_utils
 from app.ip_geo import get_client_ip
 from app.display import safe_color
+from app.database import DatabaseSwitchInProgressError
 import os
 import json
 import logging
@@ -1340,10 +1341,17 @@ def _switch_worker(target: dict, admin: dict):
         )
         _switch_update(100, "切换完成（需重启生效）", status="success")
         _switch_log(f"切换完成：{report['total_rows']} 行数据已迁移，备份 {report['backup_path']}")
-        insert_admin_log(
-            admin["id"], admin["username"], "database_switch",
-            f"切换数据库到 {report['target']}；备份 {report['backup_path']}",
-        )
+        detail = f"切换数据库到 {report['target']}；备份 {report['backup_path']}"
+        try:
+            insert_admin_log(
+                admin["id"], admin["username"], "database_switch", detail,
+            )
+        except DatabaseSwitchInProgressError:
+            # 切换已完成、本进程写入已被守卫暂停：审计日志直接写入目标库，
+            # 保证重启后新库中的操作日志完整。
+            db_migration.insert_admin_log_into_target(
+                target, admin["id"], admin["username"], "database_switch", detail,
+            )
         with _db_switch_guard:
             _db_switch_state["report"] = report
     except Exception as exc:

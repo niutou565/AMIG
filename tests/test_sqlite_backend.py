@@ -227,5 +227,62 @@ class TestConcurrency(SqliteCase):
         self.assertFalse(captured["same"])
 
 
+class TestLikeCountDialect(SqliteCase):
+    """回归测试：SQLite 后端下批量删除点赞与最近上传 IP 统计必须正常工作。
+
+    1.2.5 审计发现这两处 SQL 直接使用了 GREATEST / ANY_VALUE（MySQL 专属
+    函数），SQLite 下抛 OperationalError。修复后通过方言助手生成对应表达式。
+    """
+
+    def _insert_two_likes(self):
+        image_id = self._insert_image(status="approved", like_count=3)
+        for i in range(2):
+            models.insert_like(image_id, f"2.2.2.{i}", f"uah{i}", "省", "市")
+        like_ids = [r["id"] for r in models.get_likes_by_image(image_id, 20, 0)]
+        self.assertEqual(len(like_ids), 2)
+        return image_id, like_ids
+
+    def test_delete_likes_by_ids_syncs_count(self):
+        image_id, like_ids = self._insert_two_likes()
+        models.delete_likes_by_ids(like_ids)
+        self.assertEqual(models.count_likes_by_image(image_id), 0)
+        self.assertEqual(
+            db.get_db().execute(
+                "SELECT like_count FROM images WHERE id=?", (image_id,)
+            ).fetchone()[0],
+            1,
+        )
+
+    def test_delete_likes_by_ids_floors_count_at_zero(self):
+        image_id, like_ids = self._insert_two_likes()
+        # like_count=3 高于实际点赞行数，删除后不应出现负数
+        models.delete_likes_by_ids(like_ids)
+        self.assertGreaterEqual(
+            db.get_db().execute(
+                "SELECT like_count FROM images WHERE id=?", (image_id,)
+            ).fetchone()[0],
+            0,
+        )
+
+    def test_decrement_like_count_floors_at_zero(self):
+        image_id = self._insert_image(status="approved", like_count=0)
+        models.decrement_like_count(image_id)
+        self.assertEqual(
+            db.get_db().execute(
+                "SELECT like_count FROM images WHERE id=?", (image_id,)
+            ).fetchone()[0],
+            0,
+        )
+
+    def test_get_recent_upload_ips(self):
+        self._insert_image(status="approved", ip="3.3.3.3")
+        rows = models.get_recent_upload_ips(10)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["ip"], "3.3.3.3")
+        self.assertEqual(row["upload_count"], 1)
+        self.assertEqual(row["like_count"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
